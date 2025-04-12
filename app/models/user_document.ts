@@ -1,0 +1,64 @@
+import { DateTime } from 'luxon'
+import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
+import * as relations from '@adonisjs/lucid/types/relations'
+import User from './user.js'
+
+export default class UserDocument extends BaseModel {
+  @column({ isPrimary: true })
+  declare id: string
+
+  @column()
+  declare type: DocumentType
+
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare driving_license_images: string[]
+
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare identity_document_images: string[]
+
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare photo: string[]
+
+  @column()
+  declare status: DocumentStatus
+
+  @column()
+  declare rejection_reason: string | null
+
+  @column.dateTime()
+  declare submitted_at: DateTime
+
+  @column.dateTime()
+  declare verified_at: DateTime | null
+
+  @column.date()
+  declare driving_license_expiry_date: DateTime | null
+
+  @column.date()
+  declare identity_document_expiry_date: DateTime | null
+
+  @column()
+  declare user_id: string
+
+  @belongsTo(() => User)
+  declare user: relations.BelongsTo<typeof User>
+}
+
+export enum DocumentType {
+  DRIVING_LICENSE = 'DRIVING_LICENSE',
+  CNI = 'CNI',
+  PASSPORT = 'PASSPORT',
+  CONSULAR = 'CONSULAR',
+}
+
+export enum DocumentStatus {
+  PENDING = 'pending',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
+}
