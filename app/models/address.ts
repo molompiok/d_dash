@@ -1,6 +1,5 @@
 import { DateTime } from 'luxon'
 import { BaseModel, column } from '@adonisjs/lucid/orm'
-import { Point } from 'geojson'
 import GeoService from '#services/geo_service'
 
 export default class Address extends BaseModel {
@@ -26,7 +25,7 @@ export default class Address extends BaseModel {
     consume: GeoService.wktToPointAsGeoJSON,
     prepare: GeoService.pointToSQL,
   })
-  declare coordinates: { type: 'Point'; coordinates: Point }
+  declare coordinates: { type: 'Point'; coordinates: number[] }
 
   @column()
   declare address_details: string | null

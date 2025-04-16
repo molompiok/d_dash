@@ -2,7 +2,7 @@ import {
   CalculationEngine,
   CancellationReasonCode,
   FailureReasonCode,
-  OrderStatus,
+  OrderPriority,
 } from '#models/order'
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
@@ -36,6 +36,7 @@ export default class extends BaseSchema {
       table.enum('cancellation_reason_code', Object.values(CancellationReasonCode)).nullable()
       table.enum('failure_reason_code', Object.values(FailureReasonCode)).nullable()
       table.integer('client_fee').unsigned().notNullable()
+      table.integer('route_duration_seconds').notNullable()
       table
         .uuid('pickup_address_id')
         .references('id')
@@ -51,6 +52,17 @@ export default class extends BaseSchema {
       // table.enum('status', Object.values(OrderStatus)).defaultTo(OrderStatus.PENDING)
       table.timestamp('delivery_date', { useTz: true }).notNullable()
       table.timestamp('delivery_date_estimation', { useTz: true }).notNullable()
+      // Ajoute la colonne pour savoir à qui l'offre est faite
+      table
+        .uuid('offered_driver_id')
+        .nullable()
+        .references('id')
+        .inTable('drivers')
+        .onDelete('SET NULL')
+      // Ajoute la colonne pour le timestamp d'expiration de l'offre
+      table.timestamp('offer_expires_at', { useTz: true }).nullable() // Important: Avec fuseau horaire
+      // Ajoute un index pour rechercher rapidement les commandes offertes à un driver
+      table.index(['offered_driver_id'], 'orders_offered_driver_id_index')
       table.timestamps(true, true)
       table.index(['delivery_address_id'], 'idx_orders_delivery_address_id')
       table.index(['driver_id'], 'idx_orders_driver_id')
@@ -60,10 +72,4 @@ export default class extends BaseSchema {
   async down() {
     this.schema.dropTable(this.tableName)
   }
-}
-
-export enum OrderPriority {
-  LOW = 'low',
-  MEDIUM = 'medium',
-  HIGH = 'high',
 }

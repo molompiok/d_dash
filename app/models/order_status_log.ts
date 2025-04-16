@@ -3,10 +3,14 @@ import { DateTime } from 'luxon'
 import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
 import Order, { OrderStatus } from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
-import { Point } from 'geojson'
 import GeoService from '#services/geo_service'
 import User from './user.js'
 
+export interface StatusMetadata {
+  reason: string
+  details?: string
+  deliveryType?: string
+}
 export default class OrderStatusLog extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -21,13 +25,16 @@ export default class OrderStatusLog extends BaseModel {
   declare changed_at: DateTime
 
   @column()
+  declare metadata: StatusMetadata | null
+
+  @column()
   declare changed_by_user_id: string
 
   @column({
     consume: GeoService.wktToPointAsGeoJSON,
     prepare: GeoService.pointToSQL,
   })
-  declare current_location: { type: 'Point'; coordinates: Point }
+  declare current_location: { type: 'Point'; coordinates: number[] }
 
   // Relations
   @belongsTo(() => Order)

@@ -1,9 +1,9 @@
 // app/Models/Driver.ts
-import { BaseModel, belongsTo, column, hasMany } from '@adonisjs/lucid/orm'
+import { BaseModel, belongsTo, column, hasMany, hasOne } from '@adonisjs/lucid/orm'
 import { DateTime } from 'luxon'
 import Order from './order.js'
 import DriverPayment from './order_transaction.js'
-import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
+import type { BelongsTo, HasMany, HasOne } from '@adonisjs/lucid/types/relations'
 import type { Point } from 'geojson'
 import DriverAvailabilityRule from './driver_availability_rule.js'
 import DriverAvailabilityException from './driver_availability_exception.js'
@@ -11,6 +11,8 @@ import GeoService from '#services/geo_service'
 import DriverVehicle from './driver_vehicle.js'
 import UserDocument from './user_document.js'
 import OrderTransaction from './order_transaction.js'
+import User from './user.js'
+import DriversStatus, { DriverStatus } from './drivers_status.js'
 
 interface DeliveryStats {
   success: number
@@ -23,6 +25,9 @@ export default class Driver extends BaseModel {
   declare id: string
 
   @column()
+  declare user_id: string
+
+  @column()
   declare client_id: string | null // Client propriétaire du livreur
 
   @column()
@@ -32,10 +37,7 @@ export default class Driver extends BaseModel {
     consume: GeoService.wktToPointAsGeoJSON,
     prepare: GeoService.pointToSQL,
   })
-  declare current_location: { type: 'Point'; coordinates: Point } | null // Type geometry (PostGIS)
-
-  @column()
-  declare fcm_token: string | null
+  declare current_location: { type: 'Point'; coordinates: number[] } | null // Type geometry (PostGIS)
 
   @column()
   declare average_rating: number
@@ -51,9 +53,18 @@ export default class Driver extends BaseModel {
   @column.dateTime({ autoUpdate: true })
   declare updated_at: DateTime
 
+  @column()
+  declare latest_status: DriverStatus | null
+
   // Relations
+  @hasMany(() => DriversStatus)
+  declare statusLogs: HasMany<typeof DriversStatus>
+
   @hasMany(() => Order)
   declare orders: HasMany<typeof Order>
+
+  @belongsTo(() => User, { foreignKey: 'user_id' })
+  declare user: BelongsTo<typeof User>
 
   @hasMany(() => DriverVehicle)
   declare vehicles: HasMany<typeof DriverVehicle>

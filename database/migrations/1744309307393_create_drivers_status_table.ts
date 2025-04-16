@@ -12,6 +12,7 @@ export default class extends BaseSchema {
         .enum('status', Object.values(DriverStatus))
         .notNullable()
         .defaultTo(DriverStatus.INACTIVE)
+
       table.integer('assignments_in_progress_count').notNullable().defaultTo(0)
       table.timestamp('changed_at').notNullable() // Date de début du statut
       table.jsonb('metadata').nullable() // Informations supplémentaires (par ex., raison d'une pause)

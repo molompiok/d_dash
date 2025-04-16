@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon'
 import hash from '@adonisjs/core/services/hash'
 import { compose } from '@adonisjs/core/helpers'
-import { BaseModel, column, hasMany, hasOne } from '@adonisjs/lucid/orm'
+import { BaseModel, belongsTo, column, hasMany, hasOne } from '@adonisjs/lucid/orm'
 import { withAuthFinder } from '@adonisjs/auth/mixins/lucid'
 import { DbAccessTokensProvider } from '@adonisjs/auth/access_tokens'
 import Client from './client.js'
@@ -26,10 +26,25 @@ export default class User extends compose(BaseModel, AuthFinder) {
   declare full_name: string
 
   @column()
-  declare is_active: boolean
+  declare is_valid_client: boolean
+
+  @column()
+  declare is_valid_driver: boolean
+
+  @column()
+  declare google_id: string | null
+
+  @column()
+  declare facebook_id: string | null
+
+  @column()
+  declare user_document_id: string | null
 
   @column()
   declare role: RoleType
+
+  @column()
+  declare fcm_token: string | null
 
   @column({
     prepare: (value) => JSON.stringify(value),
@@ -56,7 +71,7 @@ export default class User extends compose(BaseModel, AuthFinder) {
   @hasOne(() => Client)
   declare client: relations.HasOne<typeof Client>
 
-  @hasOne(() => Driver)
+  @hasOne(() => Driver, { foreignKey: 'user_id' })
   declare driver: relations.HasOne<typeof Driver>
 
   @hasMany(() => UserDocument)
@@ -73,6 +88,9 @@ export default class User extends compose(BaseModel, AuthFinder) {
 
   @hasMany(() => RatingDriver, { foreignKey: 'rater_user_id' })
   declare ratings: relations.HasMany<typeof RatingDriver>
+
+  @belongsTo(() => UserDocument)
+  declare user_document: relations.BelongsTo<typeof UserDocument>
 
   static accessTokens = DbAccessTokensProvider.forModel(User)
 }

@@ -19,7 +19,12 @@ export default class Package extends BaseModel {
   @column({
     prepare: (value) => JSON.stringify(value),
   })
-  declare dimensions: { depth_cm: number; width_cm: number; height_cm: number; weight_g: number }
+  declare dimensions: {
+    depth_cm?: number
+    width_cm?: number
+    height_cm?: number
+    weight_g: number
+  } | null
 
   @column()
   declare mention_warning: PackageMentionWarning

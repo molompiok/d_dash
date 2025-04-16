@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon'
 import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
 import * as relations from '@adonisjs/lucid/types/relations'
-import User from './user.js'
+import Driver from './driver.js'
 
 export default class UserDocument extends BaseModel {
   @column({ isPrimary: true })
@@ -44,10 +44,10 @@ export default class UserDocument extends BaseModel {
   declare identity_document_expiry_date: DateTime | null
 
   @column()
-  declare user_id: string
+  declare driver_id: string
 
-  @belongsTo(() => User)
-  declare user: relations.BelongsTo<typeof User>
+  @belongsTo(() => Driver)
+  declare driver: relations.BelongsTo<typeof Driver>
 }
 
 export enum DocumentType {

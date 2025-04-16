@@ -1,16 +1,15 @@
 // app/Models/Order.ts
 import { DateTime } from 'luxon'
 import { BaseModel, column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
-import Client from './client.js'
 import Driver from './driver.js'
 import OrderStatusLog from './order_status_log.js'
-import DriverPayment from './order_transaction.js'
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
-import { OrderPriority } from '#database/migrations/1744220377899_create_orders_table'
 import db from '@adonisjs/lucid/services/db'
 import GeoService from '#services/geo_service'
 import Address from './address.js'
 import OrderTransaction from './order_transaction.js'
+import Package from './package.js'
+import Client from './client.js'
 
 export default class Order extends BaseModel {
   @column({ isPrimary: true })
@@ -54,6 +53,9 @@ export default class Order extends BaseModel {
 
   @column()
   declare route_distance_meters: number | null // distance calculée
+
+  @column()
+  declare route_duration_seconds: number | null // durée calculée
 
   @column({
     prepare: (value) => JSON.stringify(value),
@@ -99,10 +101,25 @@ export default class Order extends BaseModel {
 
   @column.dateTime({ autoUpdate: true })
   declare updated_at: DateTime
+  @column()
+  declare offered_driver_id: string | null // ID du driver sollicité
+
+  @column.dateTime() // Utilise le type dateTime de Lucid pour Luxon
+  declare offer_expires_at: DateTime | null // Timestamp d'expiration
+
+  // Relation (peut être utile mais pas essentielle pour la logique d'offre)
 
   // Relations
-  @belongsTo(() => Client)
+  @belongsTo(() => Driver, {
+    foreignKey: 'offered_driver_id',
+  })
+  declare offered_driver: BelongsTo<typeof Driver>
+
+  @belongsTo(() => Client, { foreignKey: 'client_id' })
   declare client: BelongsTo<typeof Client>
+
+  @hasMany(() => Package, { foreignKey: 'order_id' })
+  declare packages: HasMany<typeof Package>
 
   @belongsTo(() => Address, { foreignKey: 'pickup_address_id' })
   declare pickup_address: BelongsTo<typeof Address>
@@ -121,27 +138,35 @@ export default class Order extends BaseModel {
 }
 
 export enum OrderStatus {
-  PENDING = 'pending', // en attente de livreur
-  ACCEPTED = 'accepted_by_driver',
-  AT_PICKUP = 'at_pickup',
-  EN_ROUTE_TO_DELIVERY = 'en_route_to_delivery',
-  AT_DELIVERY_LOCATION = 'at_delivery_location',
-  SUCCESS = 'success',
-  FAILED = 'failed',
-  CANCELLED = 'cancelled',
+  PENDING = 'pending', // Attente assignation initiale ou après refus/expiration
+  ACCEPTED = 'accepted_by_driver', // Un driver a accepté
+  AT_PICKUP = 'at_pickup', // Driver arrivé au point de collecte
+  EN_ROUTE_TO_DELIVERY = 'en_route_to_delivery', // Colis récupéré, en route
+  AT_DELIVERY_LOCATION = 'at_delivery_location', // Driver arrivé au point de livraison
+  SUCCESS = 'success', // Livraison terminée avec succès
+  FAILED = 'failed', // Livraison échouée
+  CANCELLED = 'cancelled', // Annulé par client ou admin
 }
 
+// Raisons de l'annulation
 export enum CancellationReasonCode {
   CLIENT_REQUEST = 'client_request',
   NO_DRIVER_AVAILABLE = 'no_driver_available',
-  DRIVER_CANCELLED = 'driver_cancelled',
+  DRIVER_CANCELLED = 'driver_cancelled', // Le driver annule après avoir accepté (via support?)
   FRAUD = 'fraud',
+  ADMIN_DECISION = 'admin_decision',
   OTHER = 'other',
 }
 
 export enum CalculationEngine {
   VALHALLA = 'valhalla',
   OSRM = 'osrm',
+}
+
+export enum OrderPriority {
+  LOW = 'low',
+  MEDIUM = 'medium',
+  HIGH = 'high',
 }
 
 export enum FailureReasonCode {

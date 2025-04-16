@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon'
-import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
+import { afterCreate, BaseModel, beforeCreate, belongsTo, column } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import * as relations from '@adonisjs/lucid/types/relations'
 import User from './user.js'
@@ -34,6 +34,19 @@ export default class DriversStatus extends BaseModel {
     foreignKey: 'driver_id',
   })
   declare driver: relations.BelongsTo<typeof Driver>
+  @beforeCreate()
+  static async preventDuplicateStatus(log: DriversStatus) {
+    const driver = await Driver.find(log.driver_id)
+    if (driver && driver.latest_status === log.status) {
+      throw new Error(`Statut déjà en cours pour le livreur ${log.driver_id}, création ignorée.`)
+    }
+  }
+
+  // Hook : après création, on met à jour le driver.latest_status
+  @afterCreate()
+  static async updateDriverLatestStatus(log: DriversStatus) {
+    await Driver.query().where('id', log.driver_id).update({ latest_status: log.status })
+  }
 }
 
 export enum DriverStatus {

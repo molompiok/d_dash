@@ -20,6 +20,7 @@ export default class extends BaseSchema {
         .references('id')
         .inTable('user_documents')
         .onDelete('SET NULL') // Documents
+      table.string('latest_status').nullable()
       table.float('average_rating').notNullable().defaultTo(0)
       table.specificType('current_location', 'geometry(Point, 4326)').nullable() // Position GPS
       table.timestamp('last_location_update').nullable() // Date de dernière mise à jour de la position
