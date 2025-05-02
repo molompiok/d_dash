@@ -6,16 +6,16 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
       table
-        .uuid('client_id')
+        .string('client_id')
         .unsigned()
         .references('id')
         .inTable('clients')
         .onDelete('SET NULL')
         .nullable()
       table
-        .uuid('subscription_id')
+        .string('subscription_id')
         .unsigned()
         .references('id')
         .inTable('subscriptions')

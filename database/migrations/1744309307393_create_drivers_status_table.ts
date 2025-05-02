@@ -6,8 +6,8 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary().notNullable()
-      table.uuid('driver_id').notNullable().references('id').inTable('drivers').onDelete('CASCADE')
+      table.string('id').primary().notNullable()
+      table.string('driver_id').notNullable().references('id').inTable('drivers').onDelete('CASCADE')
       table
         .enum('status', Object.values(DriverStatus))
         .notNullable()

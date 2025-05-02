@@ -6,15 +6,15 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
       table
-        .uuid('recipient_user_id')
+        .string('recipient_user_id')
         .unsigned()
         .references('id')
         .inTable('users')
         .onDelete('SET NULL')
       table
-        .uuid('order_id')
+        .string('order_id')
         .unsigned()
         .references('id')
         .inTable('orders')

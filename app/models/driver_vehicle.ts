@@ -1,9 +1,9 @@
 // app/Modules/Drivers/Models/DriverVehicle.ts
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import { DateTime } from 'luxon'
 import Driver from './driver.js'
-
+import BaseModel from './base_model.js'
 export default class DriverVehicle extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -31,6 +31,16 @@ export default class DriverVehicle extends BaseModel {
   })
   declare vehicle_image: string[]
 
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare license_image: string[]
+
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare vehicle_document: string[]
+
   @column()
   declare model: string | null
 
@@ -40,7 +50,7 @@ export default class DriverVehicle extends BaseModel {
   @column()
   declare max_weight_kg: number
 
-  @column()
+  @column({ columnName: 'max_volume_m3' })
   declare max_volume_m3: number
 
   @column.dateTime({ autoCreate: true })
@@ -49,24 +59,23 @@ export default class DriverVehicle extends BaseModel {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updated_at: DateTime
 
-  @belongsTo(() => Driver)
+  @belongsTo(() => Driver, {
+    foreignKey: 'driver_id',
+    localKey: 'id',
+  })
   declare driver: BelongsTo<typeof Driver>
 }
 
 export enum VehicleType {
-  Bicycle = 'bicycle',
-  Scooter = 'scooter',
   Car = 'car',
-  Van_Small = 'van_small',
-  Van_Large = 'van_large',
   Truck = 'truck',
   Motorcycle = 'motorcycle',
-  Walker = 'walker',
 }
 
 export enum VehicleStatus {
   ACTIVE = 'active',
   INACTIVE = 'inactive',
+  REJECTED = 'rejected',
   PENDING = 'pending',
   MAINTENANCE = 'maintenance',
 }

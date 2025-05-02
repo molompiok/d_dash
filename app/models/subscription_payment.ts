@@ -1,10 +1,10 @@
 // app/Models/SubscriptionPayment.ts
-import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import { DateTime } from 'luxon'
 import Client from './client.js'
 import Subscription from './subscription.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
-
+import BaseModel from './base_model.js'
 export default class SubscriptionPayment extends BaseModel {
   @column({ isPrimary: true })
   declare id: string

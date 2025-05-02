@@ -6,9 +6,8 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary().defaultTo(this.raw('gen_random_uuid()')) // ou .defaultTo(this.db.rawQuery('gen_random_uuid()').knexQuery) dans Adonis v6
-
-      table.uuid('driver_id').references('id').inTable('drivers').onDelete('CASCADE').notNullable()
+      table.string('id').primary()
+      table.string('driver_id').references('id').inTable('drivers').onDelete('CASCADE').notNullable()
       table.integer('day_of_week').notNullable().checkBetween([0, 6]) // 0=Dim, 1=Lun...6=Sam
       table.time('start_time').notNullable() // Stocker en UTC dans l'app
       table.time('end_time').notNullable() // Stocker en UTC dans l'app

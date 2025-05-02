@@ -11,15 +11,15 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
-      table.uuid('client_id').references('id').inTable('clients').onDelete('CASCADE')
+      table.string('id').primary()
+      table.string('client_id').references('id').inTable('clients').onDelete('CASCADE')
       table
         .enum('priority', Object.values(OrderPriority))
         .defaultTo(OrderPriority.MEDIUM)
         .notNullable()
-      table.uuid('driver_id').references('id').inTable('drivers').onDelete('SET NULL').nullable()
+      table.string('driver_id').references('id').inTable('drivers').onDelete('SET NULL').nullable()
       table.text('note_order').nullable()
-      table.uuid('batch_id').nullable()
+      table.string('batch_id').nullable()
       table.string('confirmation_code').nullable()
       table.integer('remuneration').defaultTo(0).checkPositive()
       table.jsonb('route_instructions').nullable()
@@ -38,13 +38,13 @@ export default class extends BaseSchema {
       table.integer('client_fee').unsigned().notNullable()
       table.integer('route_duration_seconds').notNullable()
       table
-        .uuid('pickup_address_id')
+        .string('pickup_address_id')
         .references('id')
         .inTable('addresses')
         .notNullable()
         .onDelete('SET NULL')
       table
-        .uuid('delivery_address_id')
+        .string('delivery_address_id')
         .references('id')
         .inTable('addresses')
         .notNullable()
@@ -54,7 +54,7 @@ export default class extends BaseSchema {
       table.timestamp('delivery_date_estimation', { useTz: true }).notNullable()
       // Ajoute la colonne pour savoir à qui l'offre est faite
       table
-        .uuid('offered_driver_id')
+        .string('offered_driver_id')
         .nullable()
         .references('id')
         .inTable('drivers')

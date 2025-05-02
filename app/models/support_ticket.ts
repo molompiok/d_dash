@@ -1,11 +1,11 @@
 // app/Models/SupportTicket.ts
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import Client from './client.js'
 import Driver from './driver.js'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
-
+import BaseModel from './base_model.js'
 export default class SupportTicket extends BaseModel {
   @column({ isPrimary: true })
   declare id: string

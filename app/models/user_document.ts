@@ -1,8 +1,8 @@
 import { DateTime } from 'luxon'
-import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
+import { belongsTo, column } from '@adonisjs/lucid/orm'
 import * as relations from '@adonisjs/lucid/types/relations'
 import Driver from './driver.js'
-
+import BaseModel from './base_model.js'
 export default class UserDocument extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -37,10 +37,10 @@ export default class UserDocument extends BaseModel {
   @column.dateTime()
   declare verified_at: DateTime | null
 
-  @column.date()
+  @column.dateTime()
   declare driving_license_expiry_date: DateTime | null
 
-  @column.date()
+  @column.dateTime()
   declare identity_document_expiry_date: DateTime | null
 
   @column()
@@ -51,7 +51,6 @@ export default class UserDocument extends BaseModel {
 }
 
 export enum DocumentType {
-  DRIVING_LICENSE = 'DRIVING_LICENSE',
   CNI = 'CNI',
   PASSPORT = 'PASSPORT',
   CONSULAR = 'CONSULAR',

@@ -5,13 +5,14 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
-      table.uuid('user_id').references('id').inTable('users').onDelete('CASCADE')
-
+      table.string('id').primary()
+      table.string('user_id').references('id').inTable('users').onDelete('CASCADE')
+      table.boolean('is_valid_client').notNullable().defaultTo(false)
+      table.string('fcm_token').nullable()
       table.string('api_key').unique().notNullable()
       table.string('company_name').nullable()
       table
-        .uuid('subscription_id')
+        .string('subscription_id')
         .unsigned()
         .references('id')
         .inTable('subscriptions')

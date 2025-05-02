@@ -40,24 +40,11 @@ export const userDocumentValidator = vine.compile(
   vine.object({
     type: vine.enum(DocumentType), // Important de savoir quel type de document est uploadé
 
-    // Les images : On valide leur présence/type mais updateFiles gèrera le reste
     identity_document_images: vine
-      .array(
-        vine.file({
-          size: '5mb', // Ajuste la taille
-          extnames: ['jpg', 'jpeg', 'png', 'pdf', 'webp'], // Ajuste les extensions
-        })
-      )
-      .optional(), // Peut être optionnel si on met à jour seulement le permis
+      .string().optional(),
 
     driving_license_images: vine
-      .array(
-        vine.file({
-          size: '5mb',
-          extnames: ['jpg', 'jpeg', 'png', 'pdf', 'webp'],
-        })
-      )
-      .optional(), // Idem
+      .string().optional(),
 
     // Dates d'expiration (chaîne YYYY-MM-DD)
     identity_document_expiry_date: expirationDateRule.optional(),
@@ -67,8 +54,8 @@ export const userDocumentValidator = vine.compile(
     // Ces champs sont spéciaux et souvent remplis côté front avec les clefs
     // que updateFiles attendra (ex: identity_document_images_pseudo_urls)
     // Vine ne valide pas directement le contenu ici mais leur présence peut être utile
-    _identityDocumentNewPseudoUrls: vine.string().optional(), // Clé spéciale que le front peut envoyer
-    _drivingLicenseNewPseudoUrls: vine.string().optional(), // Clé spéciale
+    // _identityDocumentNewPseudoUrls: vine.string().optional(), // Clé spéciale que le front peut envoyer
+    // _drivingLicenseNewPseudoUrls: vine.string().optional(), // Clé spéciale
   })
 )
 
@@ -81,18 +68,15 @@ export default class UserDocumentController {
    */
   async show({ auth, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate() // ID du driver connecté
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
 
     try {
-      // Trouve le document directement via l'ID utilisateur
-      const document = await UserDocument.query().where('user_id', user.id).first()
-
-      if (!document) {
-        return response.notFound({ message: 'Aucun document trouvé pour ce livreur.' })
-      }
-
-      // Charge l'utilisateur associé si besoin (optionnel car on l'a déjà via auth)
-      // await document.load('user')
+      const document = await UserDocument.query().where('driver_id', driver.id).first()
 
       return response.ok(document)
     } catch (error) {
@@ -108,31 +92,44 @@ export default class UserDocumentController {
    * POST /driver/documents
    * Nécessite: Auth, Rôle Driver
    */
-  async store_or_update({ auth, request, response }: HttpContext) {
+  public async store_or_update({ auth, request, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
 
-    // Logique supplémentaire pour s'assurer que le user EST un driver
-    // Le middleware acl:driver devrait le faire, mais double vérification
-    if (user.role !== 'driver') {
-      return response.forbidden({ message: 'Action non autorisée.' })
+    logger.info({ data: request.allFiles() }, 'User trouvé')
+
+    const driver = await Driver.query()
+      .where('user_id', user.id)
+      .preload('user_document')
+      .first()
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
     }
 
-    // 1. Valider les données de la requête
+    let validated
+    try {
+      validated = await request.validateUsing(userDocumentValidator)
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur validation documents')
+      return response.badRequest({ errors: error.messages })
+    }
+
     const {
       identity_document_expiry_date,
       driving_license_expiry_date,
-      _identityDocumentNewPseudoUrls, // Récupère les clefs spéciales si utilisées
-      _drivingLicenseNewPseudoUrls,
-    } = await request.validateUsing(userDocumentValidator)
+      identity_document_images,
+      driving_license_images,
+      type,
+    } = validated
 
-    // On utilise l'ID utilisateur comme référence stable
-    const userIdForFiles = user.id
+    const userIdForFiles = driver.id
 
-    // 2. Logique de validation conditionnelle
-    // Note : request.allFiles() pourrait être plus simple si updateFiles le gère.
-    const identityFilesPresent = request.files('identity_document_images')?.length > 0
-    const licenseFilesPresent = request.files('driving_license_images')?.length > 0
+    const identityFilesPresent = request.files('identity_document_images_0')?.length > 0
+    logger.info({ identityFilesPresent }, 'identityFilesPresent')
+    const licenseFilesPresent = request.files('driving_license_images_0')?.length > 0
+    logger.info({ licenseFilesPresent }, 'licenseFilesPresent')
 
     if (identityFilesPresent && !identity_document_expiry_date) {
       return response.badRequest({
@@ -144,6 +141,7 @@ export default class UserDocumentController {
         ],
       })
     }
+
     if (licenseFilesPresent && !driving_license_expiry_date) {
       return response.badRequest({
         errors: [
@@ -155,96 +153,73 @@ export default class UserDocumentController {
       })
     }
 
-    // 3. Début Transaction
     const trx = await db.transaction()
-    let userDocument: UserDocument | null = null
 
     try {
-      // 4. Trouver le document existant (dans la transaction)
-      userDocument = await UserDocument.query({ client: trx })
-        .where('user_id', userIdForFiles)
-        .first()
-
-      // 5. Utiliser updateFiles pour gérer chaque groupe d'images
       const optionsForFiles = {
-        maxSize: 5 * 1024 * 1024, // 5MB
+        maxSize: 5 * 1024 * 1024,
         extnames: ['jpg', 'jpeg', 'png', 'pdf', 'webp'],
-        // Pas besoin de throwError ici, on gère les erreurs globalement
+        min: 2,
+        max: 2,
       }
 
-      // Appelle updateFiles pour les documents d'identité
-      const finalIdentityUrls = await updateFiles({
-        request: request, // L'objet request entier
-        table_id: userIdForFiles, // Utilise user ID
-        table_name: 'user_documents', // ou 'users' selon ta logique de nommage de fichiers
-        column_name: 'identity_document_images', // Nom de la colonne/champ
-        lastUrls: userDocument?.identity_document_images || [], // URLs précédentes
-        newPseudoUrls: _identityDocumentNewPseudoUrls, // Le champ "meta" du validateur si tu l'utilises
-        options: optionsForFiles,
-        // distinct: user.id, // Si tu as besoin d'un préfixe distinct
-      })
+      let finalIdentityUrls: string[] = []
+      if (identityFilesPresent) {
+        finalIdentityUrls = await updateFiles({
+          request,
+          table_id: userIdForFiles,
+          table_name: 'user_documents',
+          column_name: 'identity_document_images',
+          lastUrls: driver.user_document?.identity_document_images || [],
+          newPseudoUrls: identity_document_images,
+          options: optionsForFiles,
+        })
+      }
 
-      // Appelle updateFiles pour le permis de conduire
-      const finalLicenseUrls = await updateFiles({
-        request: request,
-        table_id: userIdForFiles,
-        table_name: 'user_documents',
-        column_name: 'driving_license_images',
-        lastUrls: userDocument?.driving_license_images || [],
-        newPseudoUrls: _drivingLicenseNewPseudoUrls,
-        options: optionsForFiles,
-        // distinct: user.id,
-      })
+      let finalLicenseUrls: string[] = []
+      if (licenseFilesPresent) {
+        finalLicenseUrls = await updateFiles({
+          request,
+          table_id: userIdForFiles,
+          table_name: 'user_documents',
+          column_name: 'driving_license_images',
+          lastUrls: driver.user_document?.driving_license_images || [],
+          newPseudoUrls: driving_license_images,
+          options: optionsForFiles,
+        })
+      }
 
-      // 6. Préparer les données à sauvegarder/mettre à jour
-      const dataToSave: Partial<UserDocument> & { user_id: string } = {
-        user_id: user.id, // Lie toujours à l'utilisateur
-        identity_document_images: finalIdentityUrls, // URLs retournées par updateFiles
-        driving_license_images: finalLicenseUrls,
-        // Convertit les dates si elles existent, sinon laisse null
+      const dataToSave: Partial<UserDocument> & { driver_id: string } = {
+        driver_id: driver.id,
+        type,
+        identity_document_images: finalIdentityUrls.length > 0 ? finalIdentityUrls : driver.user_document?.identity_document_images,
+        driving_license_images: finalLicenseUrls.length > 0 ? finalLicenseUrls : driver.user_document?.driving_license_images,
         identity_document_expiry_date: identity_document_expiry_date
           ? DateTime.fromISO(identity_document_expiry_date)
-          : null,
+          : driver.user_document?.identity_document_expiry_date,
         driving_license_expiry_date: driving_license_expiry_date
           ? DateTime.fromISO(driving_license_expiry_date)
-          : null,
-        // Mettre à jour les métadonnées
-        status: DocumentStatus.PENDING, // Repasse en PENDING à chaque soumission/mise à jour
+          : driver.user_document?.driving_license_expiry_date,
+        status: DocumentStatus.PENDING,
         submitted_at: DateTime.now(),
-        rejection_reason: null, // Efface l'ancienne raison de rejet
-        verified_at: null, // Annule une éventuelle ancienne vérification
+        rejection_reason: null,
+        verified_at: null,
       }
 
-      // 7. Créer ou Mettre à jour l'enregistrement UserDocument
+      let userDocument = driver.user_document
+
       if (userDocument) {
-        // Mise à jour
         userDocument.merge(dataToSave)
-        await userDocument.save() // Pas besoin de passer trx ici, car on l'a trouvé avec trx
+        await userDocument.useTransaction(trx).save()
         logger.info(`UserDocument ${userDocument.id} mis à jour pour user ${user.id}`)
       } else {
-        // Création
-        userDocument = await UserDocument.create(
-          { ...dataToSave, id: cuid() }, // Assure-toi que les champs obligatoires y sont
-          { client: trx }
-        )
+        //@ts-ignore
+        userDocument = await UserDocument.create({ ...dataToSave, id: cuid() }, { client: trx })
         logger.info(`UserDocument ${userDocument.id} créé pour user ${user.id}`)
-
-        // --- LIEN IMPORTANT : Met à jour Driver.user_document_id ---
-        const driver = await Driver.findBy('id', user.id, { client: trx })
-        if (!driver) {
-          // Ne devrait pas arriver si l'onboarding a bien fonctionné
-          throw new Error(`Enregistrement Driver non trouvé pour l'utilisateur ${user.id}`)
-        }
-        driver.user_document_id = userDocument.id
-        await driver.save() // Pas besoin de trx non plus ici
-        logger.info(`Driver ${driver.id} lié à UserDocument ${userDocument.id}`)
-        // --- Fin LIEN ---
       }
 
-      // 8. Commit Transaction
       await trx.commit()
 
-      // 9. Réponse
       return response.ok({
         message: 'Documents soumis avec succès. Ils sont en attente de validation.',
         document: userDocument.serialize(),
@@ -252,14 +227,6 @@ export default class UserDocumentController {
     } catch (error) {
       await trx.rollback()
       logger.error({ err: error, userId: user.id }, 'Erreur lors de la soumission/màj UserDocument')
-
-      // Note : Il est difficile de faire un rollback propre des fichiers créés par updateFiles sans une gestion plus fine (RollbackManager suggéré précédemment)
-      // On log l'erreur pour une éventuelle intervention manuelle sur les fichiers orphelins.
-
-      if (error.code === 'E_VALIDATION_ERROR') {
-        // Erreur venant du validateur (ne devrait pas arriver ici si bien géré avant)
-        return response.badRequest({ errors: error.messages })
-      }
       return response.internalServerError({
         message: 'Erreur lors de la soumission des documents.',
       })
@@ -268,10 +235,10 @@ export default class UserDocumentController {
 
   listDocumentsQueryValidator = vine.compile(
     vine.object({
-      status: vine.enum(DocumentStatus).optional(), // Filtre optionnel par statut
-      user_id: vine.string().uuid().optional(), // Filtre optionnel par ID de user (si besoin de voir les documents d'un user spécifique)
-      page: vine.number().min(1).optional(), // Pour la pagination
-      perPage: vine.number().min(1).max(100).optional(), // Pour la pagination (limite max)
+      status: vine.enum(DocumentStatus).optional(),
+      user_id: vine.string().optional(),
+      page: vine.number().min(1).optional(),
+      perPage: vine.number().min(1).max(100).optional(),
     })
   )
 
@@ -292,7 +259,6 @@ export default class UserDocumentController {
       const documentsPaginated = await query.orderBy('submitted_at', 'desc').paginate(page, perPage)
       return response.ok(documentsPaginated.toJSON())
     } catch (error) {
-      // --- Gestion Erreur admin_index ---
       logger.error(
         { err: error, adminId: adminUser.id },
         'Erreur récupération liste documents par admin'
@@ -383,9 +349,9 @@ export default class UserDocumentController {
       if (!driver) {
         throw new Error(`Utilisateur ${userDocument.driver_id} non trouvé`)
       }
-      driver.user.is_valid_driver = status === DocumentStatus.APPROVED
-      await driver.user.save()
-      logger.info(`Driver validity user ${driver.user_id} set to ${driver.user.is_valid_driver}`)
+      driver.is_valid_driver = status === DocumentStatus.APPROVED
+      await driver.save()
+      logger.info(`Driver validity user ${driver.user_id} set to ${driver.is_valid_driver}`)
 
       // TODO: AuditLog, Notification
 

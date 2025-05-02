@@ -6,9 +6,9 @@ export default class UserDocuments extends BaseSchema {
 
   public async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
 
-      table.uuid('driver_id').references('id').inTable('drivers').onDelete('CASCADE')
+      table.string('driver_id').references('id').inTable('drivers').onDelete('CASCADE')
 
       table.enum('type', Object.values(DocumentType)).notNullable() // ex: 'PRMIS DE CONDUIRE', 'CNI' , 'PASSPORT' , 'CONSULAR'
       table.jsonb('driving_license_images').defaultTo('[]') // ['licence.jpg']

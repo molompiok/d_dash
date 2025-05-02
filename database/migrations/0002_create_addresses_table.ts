@@ -7,7 +7,7 @@ export default class Addresses extends BaseSchema {
 
   public async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
 
       table.string('street_address').notNullable()
       table.string('city').notNullable()

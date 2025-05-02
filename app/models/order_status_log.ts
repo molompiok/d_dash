@@ -1,11 +1,11 @@
 // app/Models/OrderStatusLog.ts
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import Order, { OrderStatus } from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import GeoService from '#services/geo_service'
 import User from './user.js'
-
+import BaseModel from './base_model.js'
 export interface StatusMetadata {
   reason: string
   details?: string
@@ -23,6 +23,9 @@ export default class OrderStatusLog extends BaseModel {
 
   @column.dateTime({ autoCreate: true })
   declare changed_at: DateTime
+
+  @column.dateTime({ autoCreate: true })
+  declare created_at: DateTime
 
   @column()
   declare metadata: StatusMetadata | null

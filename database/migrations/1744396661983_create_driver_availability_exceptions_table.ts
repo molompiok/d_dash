@@ -6,9 +6,9 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary().defaultTo(this.raw('gen_random_uuid()'))
+      table.string('id').primary()
 
-      table.uuid('driver_id').references('id').inTable('drivers').onDelete('CASCADE').notNullable()
+      table.string('driver_id').references('id').inTable('drivers').onDelete('CASCADE').notNullable()
       table.date('exception_date').notNullable()
       table.boolean('is_unavailable_all_day').notNullable().defaultTo(true)
       table.time('unavailable_start_time').nullable() // Si pas toute la journée

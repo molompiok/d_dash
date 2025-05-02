@@ -1,16 +1,15 @@
 // app/Models/Order.ts
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
+import { column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import OrderStatusLog from './order_status_log.js'
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
-import db from '@adonisjs/lucid/services/db'
 import GeoService from '#services/geo_service'
 import Address from './address.js'
 import OrderTransaction from './order_transaction.js'
 import Package from './package.js'
 import Client from './client.js'
-
+import BaseModel from './base_model.js'
 export default class Order extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -44,10 +43,10 @@ export default class Order extends BaseModel {
 
   @column({
     consume: GeoService.wktToLineString,
-    prepare: (value) => {
-      const wkt = GeoService.pointsToLineString(value)
-      return db.raw(`ST_GeomFromText(?, 4326)`, [wkt])
-    },
+    // prepare: (value) => {
+    //   const wkt = GeoService.pointsToLineString(value)
+    //   return db.raw(`ST_GeomFromText(?, 4326)`, [wkt])
+    // },
   })
   declare route_geometry: { type: 'LineString'; coordinates: number[][] } | null
 
@@ -63,7 +62,7 @@ export default class Order extends BaseModel {
   declare route_instructions: object | null // Instructions si fournies
 
   @column() // Stocke 'valhalla' ou 'osrm'
-  declare route_calculation_engine: CalculationEngine | null
+  declare calculation_engine: CalculationEngine | null
 
   @column()
   declare order_number_in_batch: number | null

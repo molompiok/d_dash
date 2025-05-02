@@ -1,13 +1,13 @@
 import { DateTime } from 'luxon'
-import { BaseModel, belongsTo, column } from '@adonisjs/lucid/orm'
+import { belongsTo, column } from '@adonisjs/lucid/orm'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import Driver from '#models/driver' // Assure-toi que le chemin d'import est correct
-
+import BaseModel from './base_model.js'
 export default class DriverAvailabilityException extends BaseModel {
   public static table = 'driver_availability_exceptions'
 
   @column({ isPrimary: true })
-  declare id: string // UUID
+  declare id: string // 
 
   @column()
   declare driver_id: string

@@ -49,13 +49,14 @@ export default class DriverStatusController {
    */
   async update_status({ auth, request, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail() // Authentifié et est DRIVER (via ACL)
-    const driverId = user.id
+    const user = await auth.authenticate() // Authentifié et est DRIVER (via ACL)
+    const userId = user.id
+    logger.info(`Mise à jour du statut du driver ${userId}`)
     let payload
     try {
       payload = await request.validateUsing(updateDriverStatusValidator)
     } catch (validationError) {
-      logger.warn({ err: validationError }, `Invalid status action for driver ${driverId}.`)
+      logger.warn({ err: validationError }, `Invalid status action for driver ${userId}.`)
       return response.badRequest({
         message: 'Action de statut invalide.',
         errors: validationError.messages,
@@ -66,12 +67,14 @@ export default class DriverStatusController {
       // 1. Trouver le Driver (on pourrait vouloir vérifier certaines conditions)
       //    Exemple : Impossible de passer INACTIVE si en mission (in_work) ?
       //    Pour cela, il faudrait regarder le dernier DriversStatus *AVANT* la mise à jour.
-      const driver = await Driver.find(driverId)
+      const driver = await Driver.findBy('user_id', userId)
+      logger.info(`Driver trouvé pour user ${JSON.stringify(driver)} lors de update_status`)
       if (!driver) {
         // Ne devrait pas arriver si l'utilisateur existe et a le rôle driver
-        logger.error(`Driver non trouvé pour user ${driverId} lors de update_status`)
+        logger.error(`Driver non trouvé pour user ${userId} lors de update_status`)
         return response.notFound({ message: 'Profil Livreur non trouvé.' })
       }
+      const driverId = driver.id
 
       // **Vérification Optionnelle mais Recommandée:**
       // Empêcher le passage manuel à INACTIVE ou ON_BREAK s'il est EN MISSION
@@ -111,10 +114,10 @@ export default class DriverStatusController {
       // Renvoie le nouvel enregistrement de statut ou juste un message de succès
       return response.ok({
         message: `Statut mis à jour avec succès à "${newStatus}".`,
-        current_status: newStatusRecord.serialize(), // Renvoie le nouvel état enregistré
+        ...newStatusRecord.serialize(), // Renvoie le nouvel état enregistré
       })
     } catch (error) {
-      logger.error({ err: error, driverId }, 'Erreur mise à jour statut driver')
+      logger.error({ err: error }, 'Erreur mise à jour statut driver')
       if (error.code === 'E_VALIDATION_ERROR') {
         return response.badRequest({ message: 'Statut invalide fourni.', errors: error.messages })
       }
@@ -134,8 +137,17 @@ export default class DriverStatusController {
   async update_location({ auth, request, response }: HttpContext) {
     // 1. Authentification rapide (via middleware normalement) et récupération ID
     // Pas de .check() bloquant ici, le middleware le fait avant.
-    const userId = auth.user!.id // Utilise '!' car auth middleware garantit user si route protégée
-    const driverId = userId // Supposant que user.id == driver.id
+    const user = await auth.authenticate() // Utilise '!' car auth middleware garantit user si route protégée
+    if (!user) {
+      logger.error('Utilisateur non authentifié')
+      return response.unauthorized({ message: 'Utilisateur non authentifié.' })
+    }
+    const driver = await Driver.findBy('user_id', user.id)
+    if (!driver) {
+      logger.error('Aucun livreur trouvé pour l\'utilisateur', { userId: user.id })
+      return response.notFound({ message: 'Aucun livreur trouvé.' })
+    }
+    const driverId = driver.id
 
     // 2. Validation Rapide du Payload
     let payload
@@ -240,8 +252,17 @@ export default class DriverStatusController {
    */
   async get_current_status({ auth, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
-    const driverId = user.id
+    const user = await auth.authenticate() // Utilise '!' car auth middleware garantit user si route protégée
+    if (!user) {
+      logger.error('Utilisateur non authentifié')
+      return response.unauthorized({ message: 'Utilisateur non authentifié.' })
+    }
+    const driver = await Driver.findBy('user_id', user.id)
+    if (!driver) {
+      logger.error('Aucun livreur trouvé pour l\'utilisateur', { userId: user.id })
+      return response.notFound({ message: 'Aucun livreur trouvé.' })
+    }
+    const driverId = driver.id
 
     try {
       const lastStatusRecord = await DriversStatus.query()

@@ -1,3 +1,4 @@
+import logger from '@adonisjs/core/services/logger';
 import db from '@adonisjs/lucid/services/db'
 
 export type LatLng = { lat: number; lng: number }
@@ -33,6 +34,7 @@ export default class GeoService {
   // ✅ LineString ↔ WKT
 
   static pointsToLineString(points: LatLng[]): string {
+    logger.error(`Converting ${JSON.stringify(points)} points to LineString`)
     if (!points.length) throw new Error('Aucune coordonnée')
     if (!points.every((p) => GeoService.isValidLatLng(p.lat, p.lng))) {
       throw new Error('Coordonnées invalides')
@@ -98,7 +100,7 @@ export default class GeoService {
   }
 
   static wktToPointAsGeoJSON(wkt: string): { type: 'Point'; coordinates: [number, number] } | null {
-    const match = wkt.match(/^POINT\(([-\d.]+) ([-\d.]+)\)$/i)
+    const match = wkt?.match(/^POINT\(([-\d.]+) ([-\d.]+)\)$/i)
     if (!match) return null
 
     return {

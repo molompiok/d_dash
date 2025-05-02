@@ -7,21 +7,22 @@ export default class DriverVehicles extends BaseSchema {
 
   public async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
 
-      table.uuid('driver_id').notNullable().references('id').inTable('drivers').onDelete('CASCADE')
+      table.string('driver_id').notNullable().references('id').inTable('drivers').onDelete('CASCADE')
 
       table
-        .enum('type', Object.values(VehicleType), {
-          useNative: true,
-          enumName: VehicleType.Walker,
-        })
+        .enum('type', Object.values(VehicleType))
+        .defaultTo(VehicleType.Motorcycle)
         .notNullable()
 
-      table.string('license_plate').unique().nullable() // facultatif si vélo, trottinette, etc.
+      table.string('license_plate').unique().nullable()
       table.string('model').nullable()
+      
       table.string('color').nullable()
       table.jsonb('vehicle_image').defaultTo('[]')
+      table.jsonb('license_image').defaultTo('[]')
+      table.jsonb('vehicle_document').defaultTo('[]')
       table.boolean('has_refrigeration').defaultTo(false)
       table
         .enum('status', Object.values(VehicleStatus))

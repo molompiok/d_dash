@@ -9,17 +9,38 @@ import vine from '@vinejs/vine'
 import { DateTime } from 'luxon'
 import { updateFiles } from '#services/media/UpdateFiles'
 import { deleteFiles } from '#services/media/DeleteFiles'
+import Driver from '#models/driver'
+import { Logger } from '@adonisjs/core/logger'
+import { createFiles } from '#services/media/CreateFiles'
 
-const dateOrNull = vine
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .transform((val) => DateTime.fromISO(val))
-  .nullable()
+const expirationDateRule = vine.string().transform((value: string) => {
+  if (!value.match(/^\d{4}-\d{2}-\d{2}$/)) {
+    throw new Error("La date d'expiration doit être au format YYYY-MM-DD")
+  }
+  const date = DateTime.fromISO(value, { zone: 'utc' })
+
+  if (!date.isValid) {
+    throw new Error('La date est invalide.')
+  }
+
+  const today = DateTime.utc().startOf('day')
+  const maxFutureDate = today.plus({ years: 20 })
+
+  if (date <= today) {
+    throw new Error("La date d'expiration doit être dans le futur.")
+  }
+
+  if (date > maxFutureDate) {
+    throw new Error("La date d'expiration est trop lointaine.")
+  }
+
+  return value
+})
 
 const listVehiclesQueryValidator = vine.compile(
   vine.object({
     status: vine.enum(VehicleStatus).optional(), // Filtre optionnel par statut
-    driver_id: vine.string().uuid().optional(), // Filtre optionnel par ID de driver (si besoin de voir les véhicules d'un driver spécifique)
+    driver_id: vine.string().optional(), // Filtre optionnel par ID de driver (si besoin de voir les véhicules d'un driver spécifique)
     license_plate: vine.string().trim().optional(), // Filtre optionnel par plaque
     page: vine.number().min(1).optional(), // Pour la pagination
     perPage: vine.number().min(1).max(100).optional(), // Pour la pagination (limite max)
@@ -30,7 +51,7 @@ export const driverVehicleValidator = vine.compile(
   vine.object({
     type: vine.enum(VehicleType), // Type de véhicule obligatoire depuis l'enum
     license_plate: vine.string().trim().minLength(3).maxLength(15).optional().nullable(), // Plaque optionnelle
-    insurance_expiry_date: dateOrNull, // Date ou null
+    insurance_expiry_date: expirationDateRule, // Date ou null
 
     has_refrigeration: vine.boolean().optional(), // Par défaut à false si non fourni ?
 
@@ -40,15 +61,16 @@ export const driverVehicleValidator = vine.compile(
     color: vine.string().trim().optional().nullable(),
 
     // Capacités - nombres positifs
-    max_weight_kg: vine.number().positive().optional(),
-    max_volume_m3: vine.number().positive().optional(),
+    max_weight_kg: vine.number().positive(),
+    max_volume_m3: vine.number().positive(),
 
     // Gestion des images (similaire à UserDocument/Profile)
+    // TODO Rajouter image permis de conduire ; images document licence
     vehicle_image: vine
       .array(
         vine.file({
           // Attends un tableau de fichiers
-          size: '5mb',
+          size: '15mb',
           extnames: ['jpg', 'jpeg', 'png', 'webp'],
         })
       )
@@ -71,14 +93,28 @@ export default class DriverVehicleController {
    * Nécessite: Auth, Rôle Driver
    */
   async index({ auth, response }: HttpContext) {
+    logger.info('Liste véhicules du driver')
     await auth.check()
-    const user = auth.getUserOrFail() // L'user est un Driver grâce au middleware acl
+    const user = await auth.authenticate() // L'user est un Driver grâce au middleware acl
+
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
 
     try {
       // Récupère les véhicules liés à l'ID du driver (qui est le même que user.id)
-      const vehicles = await DriverVehicle.query().where('driver_id', user.id)
+      const vehicles = await DriverVehicle.query().where('driver_id', driver.id)
 
-      return response.ok(vehicles)
+      logger.info({ vehicles }, 'Véhicules du driver')
+
+      if (!vehicles) {
+        return response.notFound({ message: 'Aucun véhicule trouvé pour ce driver.' })
+      }
+
+      return response.ok(vehicles[0])
     } catch (error) {
       logger.error({ err: error, driverId: user.id }, 'Erreur récupération véhicules du driver')
       return response.internalServerError({
@@ -94,13 +130,19 @@ export default class DriverVehicleController {
    */
   async show({ auth, params, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     const vehicleId = params.id
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
 
     try {
       const vehicle = await DriverVehicle.query()
         .where('id', vehicleId)
-        .andWhere('driver_id', user.id) // Vérifie que le véhicule appartient bien au driver connecté
+        .andWhere('driver_id', driver.id) // Vérifie que le véhicule appartient bien au driver connecté
         .first()
 
       if (!vehicle) {
@@ -124,53 +166,101 @@ export default class DriverVehicleController {
    * POST /driver/vehicles
    * Nécessite: Auth, Rôle Driver
    */
-  async store({ auth, request, response }: HttpContext) {
+  async create_vehicle({ auth, request, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail() // ID du driver connecté
+    const user = await auth.authenticate() // ID du driver connecté
 
-    const payload = await request.validateUsing(driverVehicleValidator)
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
+    let payload: any
+    try {
+      payload = await request.validateUsing(driverVehicleValidator)
+    } catch (error) {
+      logger.error({ err: error, driverId: user.id }, 'Erreur validation véhicule')
+      return response.badRequest({ message: 'Erreur lors de la validation du véhicule.' })
+    }
 
     let newVehicle: DriverVehicle | null = null
     let vehicleImageUrls: string[] = [] // URLs finales des images
-
+    let vehicleDocumentUrls: string[] = [] // URLs finales des documents
+    let licenseImageUrls: string[] = [] // URLs finales des documents
     // Pas besoin de transaction pour une simple création normalement,
     // mais utile si on gère le rollback fichier. Utilisons-la pour la cohérence.
     const trx = await db.transaction()
+    const vehicleId = cuid()
 
     try {
-      // 1. Gérer les images avec updateFiles (même si création, pour la cohérence)
-      const optionsForFiles = {
-        maxSize: 5 * 1024 * 1024,
-        extnames: ['jpg', 'jpeg', 'png', 'webp'],
-      }
-
-      vehicleImageUrls = await updateFiles({
+      // 1. Gérer les images avec createFiles (même si création, pour la cohérence)
+      vehicleImageUrls = await createFiles({
         request: request,
-        table_id: `driver_${user.id}`, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: UUID temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
+        table_id: vehicleId, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
         table_name: 'driver_vehicles',
         column_name: 'vehicle_image',
-        lastUrls: [], // Vide car création
-        newPseudoUrls: payload._vehicleImageNewPseudoUrls, // Utilise le champ meta si présent
-        options: optionsForFiles,
-        // Note: updateFiles doit être adapté si table_id n'est pas encore connu...
-        // Alternative: créer l'enregistrement puis appeler updateFiles avec l'ID réel. On fait ça:
+        options: {
+          maxSize: 5 * 1024 * 1024, // Exemple : 5MB max par fichier
+          // resize: { width: 800, height: 600 },
+          extname: ['jpg', 'jpeg', 'png', 'webp'],
+          compress: 'img',
+          min: 1, // Exemple: au moins 1 image requise
+          throwError: true // Pour renvoyer une erreur claire si validation échoue
+        }
       })
+
+      vehicleDocumentUrls = await createFiles({
+        request: request,
+        table_id: vehicleId, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
+        table_name: 'driver_vehicles',
+        column_name: 'vehicle_document',
+        options: {
+          maxSize: 5 * 1024 * 1024, // Exemple : 5MB max par fichier
+          // resize: { width: 800, height: 600 },
+          extname: ['jpg', 'jpeg', 'png', 'webp'],
+          compress: 'img',
+          min: 1, // Exemple: au moins 1 image requise
+          throwError: true // Pour renvoyer une erreur claire si validation échoue
+        }
+      })
+
+      licenseImageUrls = await createFiles({
+        request: request,
+        table_id: vehicleId, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
+        table_name: 'driver_vehicles',
+        column_name: 'license_image',
+        options: {
+          maxSize: 5 * 1024 * 1024, // Exemple : 5MB max par fichier
+          // resize: { width: 800, height: 600 },
+          extname: ['jpg', 'jpeg', 'png', 'webp'],
+          compress: 'img',
+          min: 1, // Exemple: au moins 1 image requise
+          throwError: true // Pour renvoyer une erreur claire si validation échoue
+        }
+      })
+
+      const now = DateTime.utc()
+
+      const fullDate = DateTime.fromISO(`${payload.insurance_expiry_date}T${now.toFormat('HH:mm:ss.SSS')}`, { zone: 'utc' })
 
       // 2. Créer l'enregistrement véhicule dans la transaction
       newVehicle = await DriverVehicle.create(
         {
-          id: cuid(), // Génère l'ID du véhicule
-          driver_id: user.id, // Lie au driver connecté
+          id: vehicleId, // Génère l'ID du véhicule
+          driver_id: driver.id, // Lie au driver connecté
           type: payload.type,
           license_plate: payload.license_plate,
-          insurance_expiry_date: payload.insurance_expiry_date || null,
+          insurance_expiry_date: fullDate,
           has_refrigeration: payload.has_refrigeration ?? false, // Valeur par défaut
           status: VehicleStatus.PENDING, // Statut par défaut si non fourni
           model: payload.model,
           color: payload.color,
           max_weight_kg: payload.max_weight_kg,
           max_volume_m3: payload.max_volume_m3,
-          vehicle_image: [], // Sera mis à jour juste après avec les URLs finales
+          vehicle_image: vehicleImageUrls || [], // Sera mis à jour juste après avec les URLs finales
+          vehicle_document: vehicleDocumentUrls || [], // Sera mis à jour juste après avec les URLs finales
+          license_image: licenseImageUrls || [], // Sera mis à jour juste après avec les URLs finales
         },
         { client: trx }
       ) // Utilise la transaction
@@ -229,10 +319,16 @@ export default class DriverVehicleController {
    * PUT /driver/vehicles/:id
    * Nécessite: Auth, Rôle Driver
    */
-  async update({ auth, params, request, response }: HttpContext) {
+  async update_vehicle({ auth, params, request, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     const vehicleId = params.id
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
 
     const payload = await request.validateUsing(driverVehicleValidator)
 
@@ -245,7 +341,7 @@ export default class DriverVehicleController {
       // 1. Trouver le véhicule et s'assurer qu'il appartient au driver (DANS la transaction)
       vehicle = await DriverVehicle.query({ client: trx })
         .where('id', vehicleId)
-        .andWhere('driver_id', user.id)
+        .andWhere('driver_id', driver.id)
         .first()
 
       if (!vehicle) {
@@ -281,12 +377,15 @@ export default class DriverVehicleController {
         },
       })
 
+      const now = DateTime.utc()
+      const fullDate = DateTime.fromISO(`${payload.insurance_expiry_date}T${now.toFormat('HH:mm:ss.SSS')}`, { zone: 'utc' })
+
       // 3. Mettre à jour les champs du véhicule
       // Merge ne met à jour que les champs définis dans le payload
       vehicle.merge({
         type: payload.type,
         license_plate: payload.license_plate,
-        insurance_expiry_date: payload.insurance_expiry_date,
+        insurance_expiry_date: fullDate,
         has_refrigeration: payload.has_refrigeration,
         model: payload.model,
         color: payload.color,
@@ -335,10 +434,16 @@ export default class DriverVehicleController {
    * DELETE /driver/vehicles/:id
    * Nécessite: Auth, Rôle Driver
    */
-  async destroy({ auth, params, response }: HttpContext) {
+  async delete_vehicle({ auth, params, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     const vehicleId = params.id
+    const driver = await Driver.findBy('user_id', user.id)
+
+    if (!driver) {
+      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+    }
 
     // Important : PAS de transaction nécessaire pour une simple suppression
     // MAIS il faut supprimer les fichiers associés AVANT ou APRES
@@ -346,7 +451,7 @@ export default class DriverVehicleController {
     try {
       const vehicle = await DriverVehicle.query()
         .where('id', vehicleId)
-        .andWhere('driver_id', user.id) // Vérifie propriété
+        .andWhere('driver_id', driver.id) // Vérifie propriété
         .first()
 
       if (!vehicle) {

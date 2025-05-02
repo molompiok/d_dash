@@ -29,7 +29,7 @@ export default class MissionController {
    */
   async accept({ params, auth, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail() // Driver authentifié
+    const user = await auth.authenticate() // Driver authentifié
     // Retrouver le profil Driver pour l'ID stable (pourrait être fait différemment)
     const driver = await Driver.query().where('user_id', user.id).first() // On peut supposer qu'il existe si user.role='driver'
     if (!driver) {
@@ -161,12 +161,12 @@ export default class MissionController {
       // C'est moins critique si on assigne driver_id immédiatement, mais utile pour "nettoyer" des process workers.
 
       // 6. Notifier le client (gestion erreur silencieuse)
-      let clientUser: User | null = null
+      let clientUser: Client | null = null
       try {
         // @ts-ignore
         await order.load('client', (q) => q.preload('user')) // Assure que la relation est chargée si ce n'était pas le cas
-        if (order.client?.user?.fcm_token) {
-          clientUser = await User.find(order.client.user.id)
+        if (order.client?.fcm_token) {
+          clientUser = await Client.find(order.client.id)
           if (clientUser?.fcm_token) {
             await redis_helper.enqueuePushNotification(
               clientUser.fcm_token,
@@ -225,7 +225,7 @@ export default class MissionController {
    */
   async refuse({ params, auth, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     // Optionnel : Vérifier profil Driver pour consistance
     const driver = await Driver.query().where('user_id', user.id).first() // On peut supposer qu'il existe si user.role='driver'
     if (!driver) {
@@ -309,18 +309,18 @@ export default class MissionController {
       try {
         const messageId = await redis_helper.publishMissionRefused(orderId, driverId)
         await redis_helper.enqueuePushNotification(
-          user.fcm_token,
+          driver.fcm_token,
           'Refus de mission',
           `Vous avez refusé la mission #${orderId.substring(0, 6)}...`,
           { orderId: order.id, status: OrderStatus.ACCEPTED } // Data utiles
         )
 
         //@ts-ignore
-        const ClientUser = await Client.query().where('id', order.client_id).preload('user').first()
+        const ClientUser = await Client.query().where('id', order.client_id).first()
 
-        if (ClientUser && ClientUser.user.fcm_token) {
+        if (ClientUser && ClientUser.fcm_token) {
           await redis_helper.enqueuePushNotification(
-            ClientUser.user.fcm_token,
+            ClientUser.fcm_token,
             'Recherche en cours',
             `Votre mission #${orderId.substring(0, 6)}... a été refusée.`,
             { orderId: order.id, status: OrderStatus.ACCEPTED } // Data utiles
@@ -369,7 +369,7 @@ export default class MissionController {
    */
   async update_mission_status({ params, request, auth, response }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail() // Driver authentifié
+    const user = await auth.authenticate() // Driver authentifié
     const driverId = user.id
     const orderId = params.orderId
 
@@ -606,7 +606,7 @@ export default class MissionController {
       let notifTitle = ''
       let notifBody = ''
       let notifData = {}
-      if (clientUser?.user?.fcm_token) {
+      if (clientUser?.fcm_token) {
         // clientUser doit être chargé avant/pendant la transaction
         switch (newStatus) {
           case OrderStatus.EN_ROUTE_TO_DELIVERY:
@@ -638,7 +638,7 @@ export default class MissionController {
           try {
             // *** APPEL A REDIS HELPER ***
             redis_helper.enqueuePushNotification(
-              clientUser.user.fcm_token,
+              clientUser.fcm_token,
               notifTitle,
               notifBody,
               notifData

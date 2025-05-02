@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon'
-import { BaseModel, column } from '@adonisjs/lucid/orm'
+import {  column } from '@adonisjs/lucid/orm'
 import GeoService from '#services/geo_service'
+import BaseModel from './base_model.js'
 
 export default class Address extends BaseModel {
   @column({ isPrimary: true })

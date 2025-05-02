@@ -6,6 +6,7 @@ import vine from '@vinejs/vine'
 
 import type { HttpContext } from '@adonisjs/core/http'
 import { inject } from '@adonisjs/core'
+import { RoleType } from '#models/user'
 const phoneRule = vine
   .string()
   .trim()
@@ -15,6 +16,7 @@ export const profileValidator = vine.compile(
   vine.object({
     full_name: vine.string().trim().minLength(3).optional(), // Optionnel: on ne modifie que si fourni
 
+    role: vine.enum(RoleType), // Optionnel: on ne modifie que si fourni
     // Mettre à jour la liste des téléphones
     phone: vine.array(phoneRule).optional(), // Le tableau entier remplace l'ancien
 
@@ -25,6 +27,7 @@ export const profileValidator = vine.compile(
         extnames: ['jpg', 'jpeg', 'png', 'webp'],
       })
       .optional(), // Fichier photo optionnel
+    fcm_token: vine.string().optional(), // Optionnel: on ne modifie que si fourni
 
     // Champ "meta" si updateFiles est utilisé pour une seule photo
     _photoNewPseudoUrls: vine.string().optional(),
@@ -38,16 +41,30 @@ export default class ProfileController {
    * Récupère les informations complètes du profil de l'utilisateur connecté.
    * GET /profile (la route existait déjà)
    */
-  async me({ auth, response }: HttpContext) {
+  async me({ auth, response, request }: HttpContext) {
     // Le middleware 'auth' s'est déjà chargé de l'authentification
+    const data = request.qs()
+    logger.info({ data }, 'Données récupérées')
     await auth.check() // Force le chargement si ce n'est pas déjà fait
-    const user = auth.getUserOrFail()
+    // const role = await request.validateUsing()
+    let role: RoleType
+
+    try {
+      role = await vine.compile(vine.enum(RoleType)).validate(data.role)
+      logger.info({ role }, 'Rôle récupéré')
+    } catch (error) {
+      logger.error({ err: error }, 'Erreur récupération rôle utilisateur')
+      return response.badRequest({ message: 'Paramètres de requête invalides.' })
+    }
+
+    logger.info({ role }, 'Rôle récupéré')
+    const user = await auth.authenticate()
 
     try {
       // Charge les relations en fonction du rôle pour une réponse complète
-      if (user.role === 'client') {
+      if (role === 'client') {
         await user.load('client', (query) => query.preload('subscription')) // Exemple : Charger aussi l'abonnement
-      } else if (user.role === 'driver') {
+      } else if (role === 'driver') {
         await user.load('driver', (query) => query.preload('vehicles').preload('user_document')) // Charger relations du driver
       }
 
@@ -59,77 +76,82 @@ export default class ProfileController {
     }
   }
 
-  /**
-   * Met à jour les informations du profil de l'utilisateur connecté.
-   * PATCH /profile ou PUT /profile
-   */
   async update({ auth, request, response }: HttpContext) {
+    logger.info('Mise à jour du profil utilisateur')
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
+    console.log('/************/', user);
 
-    // Valide les données reçues pour la mise à jour
-    // Le validateur n'échoue que si un champ fourni est invalide.
-    // Les champs absents ne causent pas d'erreur car 'optional()'
+    logger.debug('Utilisateur trouvé', { userId: user })
     const payload = await request.validateUsing(profileValidator)
-    const photoFile = request.file('photo') // Récupère le fichier s'il existe
+    const photoFile = request.file('photo')
 
-    let newPhotoUrl: string[] = user.photo // Garde l'ancienne par défaut
-    let oldPhotoUrlToDeleteOnError: string | null = null // Pour le rollback fichier
+    let newPhotoUrl: string[] = user.photo
+    let oldPhotoUrlToDeleteOnError: string | null = null
 
-    // Transaction pour la mise à jour et potentiellement le fichier
     const trx = await db.transaction()
 
     try {
-      // 1. Mettre à jour la photo si un nouveau fichier est fourni
-      if (photoFile) {
-        const options = {
-          maxSize: 5 * 1024 * 1024,
-          extnames: ['jpg', 'jpeg', 'png', 'webp'],
-        }
+      user.useTransaction(trx)
 
-        // updateFiles retourne un tableau, même pour un seul fichier
+      // Mise à jour de la photo si un fichier est envoyé
+      if (photoFile) {
         const updatedUrls = await updateFiles({
-          request: request,
+          request,
           table_id: user.id,
           table_name: 'users',
           column_name: 'photo',
-          lastUrls: user.photo || [], // Anciennes URLs photo (normalement une seule)
-          newPseudoUrls: payload._photoNewPseudoUrls, // Si vous utilisez cette approche
-          options: options,
+          lastUrls: user.photo || [],
+          newPseudoUrls: payload._photoNewPseudoUrls,
+          options: {
+            maxSize: 5 * 1024 * 1024,
+            extname: ['jpg', 'jpeg', 'png', 'webp'],
+          },
         })
 
-        // Prend la première URL retournée s'il y en a une
         if (updatedUrls.length > 0) {
-          newPhotoUrl = [updatedUrls[0]] // Met à jour la nouvelle URL (en tableau)
-          // Mémorise l'URL créée pour la supprimer en cas de rollback DB
-          // Note: Ceci est une simplification. Un RollbackManager serait plus robuste.
+          newPhotoUrl = [updatedUrls[0]]
           if (!user.photo.includes(updatedUrls[0])) {
-            // Si c'est réellement une *nouvelle* photo
             oldPhotoUrlToDeleteOnError = updatedUrls[0]
           }
-        } else {
-          // Si updateFiles ne retourne rien (erreur silencieuse ?), on garde l'ancienne
-          newPhotoUrl = user.photo
         }
       }
 
-      // 2. Mettre à jour les champs de l'utilisateur dans la transaction
-      // On ne merge que les champs qui existent dans le payload validé
-      user.useTransaction(trx) // Applique la transaction à l'objet user existant
-      if (payload.full_name !== undefined) user.full_name = payload.full_name
-      if (payload.phone !== undefined) user.phone = payload.phone
-      user.photo = newPhotoUrl // Applique la nouvelle (ou ancienne) URL de photo
+      // Mise à jour des champs simples
+      if (payload.full_name !== undefined) {
+        user.full_name = payload.full_name
+      }
+      if (payload.phone !== undefined) {
+        user.phone = payload.phone
+      }
 
-      await user.save() // Sauvegarde les modifications utilisateur dans la transaction
+      // Mise à jour du FCM Token en fonction du rôle
+      if (payload.fcm_token !== undefined && payload.role) {
+        if (payload.role === RoleType.CLIENT) {
+          await user.load('client')
+          user.client.useTransaction(trx)
+          user.client.fcm_token = payload.fcm_token
+          await user.client.save()
+        } else if (payload.role === RoleType.DRIVER) {
+          await user.load('driver')
+          user.driver.useTransaction(trx)
+          user.driver.fcm_token = payload.fcm_token
+          await user.driver.save()
+        }
+      }
 
-      // 3. Commit la transaction
+      user.photo = newPhotoUrl
+      await user.save()
+
       await trx.commit()
 
-      // Charge à nouveau les relations pour la réponse (car elles pourraient avoir changé)
-      if (user.role === 'client') await user.load('client')
-      if (user.role === 'driver') await user.load('driver')
+      // Recharge la bonne relation après commit
+      if (payload.role === RoleType.CLIENT) {
+        await user.load('client')
+      } else if (payload.role === RoleType.DRIVER) {
+        await user.load('driver')
+      }
 
-      // 4. Réponse
       return response.ok({
         message: 'Profil mis à jour avec succès.',
         user: user.serialize({ fields: { omit: ['password'] } }),
@@ -137,27 +159,24 @@ export default class ProfileController {
     } catch (error) {
       await trx.rollback()
 
-      // Tentative de suppression de la nouvelle photo si créée pendant la transaction échouée
       if (oldPhotoUrlToDeleteOnError) {
-        logger.warn(
-          `Rollback update profile for user ${user.id}, attempting to delete new file: ${oldPhotoUrlToDeleteOnError}`
-        )
+        logger.warn(`Rollback update profile for user ${user.id}, attempting to delete new file: ${oldPhotoUrlToDeleteOnError}`)
         try {
-          // Ici, deleteFiles aurait besoin de l'URL ou d'un identifiant pour fonctionner
-          await deleteFiles(user.id, 'photo') // Utilise le nom de champ et ID user
+          await deleteFiles(user.id, 'photo')
         } catch (deleteError) {
-          logger.error(
-            { err: deleteError },
-            `Failed to delete photo after rollback for user ${user.id}`
-          )
+          logger.error({ err: deleteError }, `Failed to delete photo after rollback for user ${user.id}`)
         }
       }
 
       logger.error({ err: error, userId: user.id }, 'Erreur mise à jour profil utilisateur')
+
       if (error.code === 'E_VALIDATION_ERROR') {
+        logger.error({ err: error, userId: user.id }, 'Erreur validation mise à jour profil utilisateur')
         return response.badRequest({ errors: error.messages })
       }
+
       return response.internalServerError({ message: 'Erreur lors de la mise à jour du profil.' })
     }
   }
+
 } // Fin du contrôleur

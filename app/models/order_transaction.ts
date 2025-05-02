@@ -1,10 +1,10 @@
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import Client from './client.js'
-
+import BaseModel from './base_model.js'
 export default class OrderTransaction extends BaseModel {
   @column({ isPrimary: true })
   declare id: string

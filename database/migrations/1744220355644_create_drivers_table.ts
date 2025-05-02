@@ -5,22 +5,16 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      // Si Option 1 (Recommandé)
-      table.uuid('id').primary()
+      table.string('id').primary()
       table
-        .uuid('user_id')
+        .string('user_id')
         .references('id')
         .inTable('users')
         .onDelete('CASCADE')
         .notNullable()
         .unique()
-      table
-        .uuid('user_document_id')
-        .nullable()
-        .references('id')
-        .inTable('user_documents')
-        .onDelete('SET NULL') // Documents
       table.string('latest_status').nullable()
+      table.boolean('is_valid_driver').notNullable().defaultTo(false)
       table.float('average_rating').notNullable().defaultTo(0)
       table.specificType('current_location', 'geometry(Point, 4326)').nullable() // Position GPS
       table.timestamp('last_location_update').nullable() // Date de dernière mise à jour de la position
@@ -29,7 +23,6 @@ export default class extends BaseSchema {
       table.timestamp('updated_at').notNullable()
 
       table.jsonb('delivery_stats').defaultTo('{}') // { success: number, failure: number, total: number }
-      table.index(['client_id'], 'idx_drivers_client_id')
       table.index(['current_location'], 'idx_drivers_location', { indexType: 'gist' }) // Index GIST pour PostGIS
     })
   }

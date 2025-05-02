@@ -1,10 +1,10 @@
 // app/Models/Notification.ts
 import { DateTime } from 'luxon'
-import { BaseModel, column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo } from '@adonisjs/lucid/orm'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import User from './user.js'
-
+import BaseModel from './base_model.js'
 export default class Notification extends BaseModel {
   @column({ isPrimary: true })
   declare id: string

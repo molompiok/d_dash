@@ -1,9 +1,8 @@
 import { DateTime } from 'luxon'
-import { afterCreate, BaseModel, beforeCreate, belongsTo, column } from '@adonisjs/lucid/orm'
+import { afterCreate, beforeCreate, belongsTo, column } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import * as relations from '@adonisjs/lucid/types/relations'
-import User from './user.js'
-
+import BaseModel from './base_model.js'
 interface StatusMetadata {
   reason?: string
   details?: string
@@ -12,6 +11,8 @@ interface StatusMetadata {
 }
 
 export default class DriversStatus extends BaseModel {
+  public static table = 'driver_statuses'
+
   @column({ isPrimary: true })
   declare id: string
 

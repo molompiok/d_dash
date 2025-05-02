@@ -6,16 +6,16 @@ export default class extends BaseSchema {
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
-      table.uuid('id').primary()
+      table.string('id').primary()
       table
-        .uuid('driver_id')
+        .string('driver_id')
         .unsigned()
         .references('id')
         .inTable('drivers')
         .onDelete('SET NULL')
         .nullable()
       table
-        .uuid('order_id')
+        .string('order_id')
         .unsigned()
         .references('id')
         .inTable('orders')
@@ -23,7 +23,7 @@ export default class extends BaseSchema {
         .nullable()
       table.string('currency').defaultTo('CFA')
       table
-        .uuid('client_id')
+        .string('client_id')
         .unsigned()
         .references('id')
         .inTable('clients')

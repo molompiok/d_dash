@@ -25,7 +25,7 @@ interface MatrixResult {
   engine: CalculationEngine
 }
 
-const GEOCODING_TIMEOUT = 5000
+const GEOCODING_TIMEOUT = 15000
 const ROUTING_TIMEOUT = 10000
 const MATRIX_TIMEOUT = 7000
 
@@ -52,7 +52,7 @@ class GeoHelper {
     }
 
     const url = `${this.nominatimUrl}/search?format=json&q=${encodeURIComponent(addressString)}&limit=1&addressdetails=1`
-    logger.debug(`Geocoding request to: ${url}`)
+    logger.error(`Geocoding request to: ${url}`)
 
     try {
       const response = await axios.get(url, { timeout: GEOCODING_TIMEOUT }) // Timeout 5s

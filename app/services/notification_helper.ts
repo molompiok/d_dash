@@ -12,24 +12,49 @@ export type SendNotificationResult =
   | { success: false; error: any; code?: string; isTokenInvalid?: boolean } // Échec : détails de l'erreur
 
 // Initialise Firebase (doit être appelée au démarrage de l'app/worker)
+interface ServiceAccount {
+  type: string | undefined;
+  project_id: string | undefined;
+  private_key_id: string | undefined;
+  private_key: string | undefined;
+  client_email: string | undefined;
+  client_id: string | undefined;
+  auth_uri: string | undefined;
+  token_uri: string | undefined;
+  auth_provider_x509_cert_url: string | undefined;
+  client_x509_cert_url: string | undefined;
+  universe_domain: string | undefined;
+}
+
 async function initializeFirebaseApp() {
-  if (isFirebaseInitialized) return
-  const serviceAccountPath = env.get('FIREBASE_SERVICE_ACCOUNT_KEY_PATH')
-  if (!serviceAccountPath) {
-    logger.error('FIREBASE_SERVICE_ACCOUNT_KEY_PATH non défini.')
-    return
-  }
+  if (isFirebaseInitialized) return;
+
   try {
-    const serviceAccountRaw = await fs.promises.readFile(serviceAccountPath, 'utf-8')
-    const serviceAccount = JSON.parse(serviceAccountRaw)
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) })
-    isFirebaseInitialized = true
-    logger.info('Firebase Admin SDK initialisé.')
+    const serviceAccount: ServiceAccount = {
+      type: env.get('FIREBASE_TYPE'),
+      project_id: env.get('FIREBASE_PROJECT_ID'),
+      private_key_id: env.get('FIREBASE_PRIVATE_KEY_ID'),
+      private_key: env.get('FIREBASE_PRIVATE_KEY')?.replace(/\\n/g, '\n'),
+      client_email: env.get('FIREBASE_CLIENT_EMAIL'),
+      client_id: env.get('FIREBASE_CLIENT_ID'),
+      auth_uri: env.get('FIREBASE_AUTH_URI'),
+      token_uri: env.get('FIREBASE_TOKEN_URI'),
+      auth_provider_x509_cert_url: env.get('FIREBASE_AUTH_PROVIDER_X509_CERT_URL'),
+      client_x509_cert_url: env.get('FIREBASE_CLIENT_X509_CERT_URL'),
+      universe_domain: env.get('FIREBASE_UNIVERSE_DOMAIN'),
+    };
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
+    });
+
+    isFirebaseInitialized = true;
+    logger.info('Firebase Admin SDK initialisé.');
   } catch (error) {
     logger.error(
-      { err: error, path: serviceAccountPath },
+      { err: error },
       'Erreur initialisation Firebase Admin SDK'
-    )
+    );
   }
 }
 
@@ -44,6 +69,7 @@ class NotificationHelper {
     data?: { [key: string]: any } // Accepte n'importe quel objet
   ): Promise<SendNotificationResult> {
     if (!isFirebaseInitialized) {
+      initializeFirebaseApp();
       logger.warn('Attempted to send notification but Firebase SDK is not initialized.')
       return {
         success: false,

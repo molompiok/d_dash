@@ -24,7 +24,6 @@ import { DateTime } from 'luxon'
 import GeoHelper from '#services/geo_helper' // Fonctions geocodeAddress, calculateRouteDetails
 import PricingHelper, { SimplePackageInfo } from '#services/pricing_helper' // Fonction calculateFees
 import RedisHelper from '#services/redis_helper' // Fonction publishMissionOffer
-import NotificationHelper from '#services/notification_helper' // Fonction sendPushNotification
 // --- Fin Imports Helpers ---
 
 // --- Import des Validateurs ---
@@ -50,15 +49,15 @@ const cancelOrderValidator = vine.compile(
 
 const assignDriverValidator = vine.compile(
   vine.object({
-    driver_id: vine.string().uuid(), // L'ID du driver à assigner
+    driver_id: vine.string(), // L'ID du driver à assigner
   })
 )
 
 const listOrdersQueryValidator = vine.compile(
   vine.object({
     status: vine.enum(OrderStatus).optional(),
-    client_id: vine.string().uuid().optional(),
-    driver_id: vine.string().uuid().optional(),
+    client_id: vine.string().optional(),
+    driver_id: vine.string().optional(),
     date_from: vine
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -82,15 +81,15 @@ const packageDimensionsValidator = vine.object({
 export const createOrderValidator = vine.compile(
   vine.object({
     // Adresses en texte simple (la validation de la *validité* de l'adresse est déléguée au géocodage)
-    pickup_address_text: vine.string().trim().minLength(10),
-    delivery_address_text: vine.string().trim().minLength(10),
+    pickup_address_text: vine.string().trim().minLength(3),
+    delivery_address_text: vine.string().trim().minLength(3),
 
     // Détails des colis
     packages: vine
       .array(
         vine.object({
           name: vine.string().trim().minLength(3), // Nom/Description courte
-          description: vine.string().trim().optional().nullable(),
+          description: vine.string().trim().optional().optional(),
           dimensions: packageDimensionsValidator,
           mention_warning: vine.enum(PackageMentionWarning).optional(), // Enum pour fragile, froid, etc.
           quantity: vine.number().min(1),
@@ -123,9 +122,9 @@ export default class OrderController {
    * [CLIENT/API] Crée une nouvelle commande de livraison.
    * POST /orders
    */
-  async store({ request, response, auth }: HttpContext) {
+  async create_order({ request, response, auth }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     await user.load('client')
     if (!user.client) {
       return response.forbidden({ message: 'Utilisateur non associé à un compte client.' })
@@ -135,7 +134,6 @@ export default class OrderController {
     // TODO: Vérifier la limite d'abonnement du client si implémenté.
 
     // --- Configuration Globale (depuis env ou config) ---
-    const DEFAULT_CURRENCY = env.get('APP_CURRENCY', 'EUR')
     const OFFER_DURATION_SECONDS = Number.parseInt(
       env.get('DRIVER_OFFER_DURATION_SECONDS', '20'),
       10
@@ -171,11 +169,11 @@ export default class OrderController {
       let deliveryCoords
       try {
         pickupCoords = await GeoHelper.geocodeAddress(payload.pickup_address_text)
-        if (!pickupCoords)
-          throw new Error(`Adresse de départ introuvable: ${payload.pickup_address_text}`)
+        logger.info(`Adresse de départ géocodée: ${JSON.stringify(pickupCoords)}`)
+        if (!pickupCoords) throw new Error(`Adresse de départ introuvable: ${payload.pickup_address_text}`)
         deliveryCoords = await GeoHelper.geocodeAddress(payload.delivery_address_text)
-        if (!deliveryCoords)
-          throw new Error(`Adresse de livraison introuvable: ${payload.delivery_address_text}`)
+        logger.info(`Adresse de livraison géocodée: ${JSON.stringify(deliveryCoords)}`)
+        if (!deliveryCoords) throw new Error(`Adresse de livraison introuvable: ${payload.delivery_address_text}`)
       } catch (geoError) {
         await trx.rollback() // Important d'annuler même si l'erreur est avant les écritures DB
         logger.warn(
@@ -261,13 +259,14 @@ export default class OrderController {
           priority: OrderPriority.MEDIUM,
           note_order: payload.note_order,
           //   currency: env.get('APP_CURRENCY', 'EUR'),
-          client_fee: clientFee,
-          remuneration: driverRemuneration,
+          client_fee: Math.round(clientFee), //TODO mettre float dans la DB
+          remuneration: Math.round(driverRemuneration), //TODO mettre float dans la DB
           route_distance_meters: routeDetails.distanceMeters,
           route_duration_seconds: routeDetails.durationSeconds,
           route_geometry: routeDetails.geometry,
-          route_calculation_engine: routeDetails.engine,
+          calculation_engine: routeDetails.engine,
           delivery_date_estimation: estimatedDeliveryTime,
+          delivery_date: DateTime.now().plus({ seconds: routeDetails.durationSeconds + (ETA_BUFFER_MINUTES + 600) * 60 * 60 * 1000 }),
           proof_of_pickup_media: [],
           proof_of_delivery_media: [],
           cancellation_reason_code: null,
@@ -304,6 +303,7 @@ export default class OrderController {
           changed_by_user_id: user.id,
           current_location: pickupAddress.coordinates,
           metadata: null,
+          created_at: newOrder!.created_at ?? DateTime.now(),
         },
         { client: trx }
       )
@@ -327,8 +327,8 @@ export default class OrderController {
             `
                    INNER JOIN (
                        SELECT driver_id, status, changed_at
-                       FROM drivers_statuses ds1
-                       WHERE changed_at = (SELECT MAX(changed_at) FROM drivers_statuses ds2 WHERE ds1.driver_id = ds2.driver_id)
+                       FROM driver_statuses ds1
+                       WHERE changed_at = (SELECT MAX(changed_at) FROM driver_statuses ds2 WHERE ds1.driver_id = ds2.driver_id)
                    ) latest_status ON latest_status.driver_id = drivers.id
                `
           )
@@ -372,7 +372,7 @@ export default class OrderController {
           await newOrder.save() // Toujours via trx
 
           //   b. Notifier le driver (via Push)
-          if (selectedDriver.user.fcm_token) {
+          if (selectedDriver.fcm_token) {
             const notifTitle = 'Nouvelle Mission Disponible'
             const notifBody = `Course #${newOrder.id.substring(0, 6)}... Rém: ${newOrder.remuneration} ${newOrder.currency}. Acceptez avant ${expiresAt.toFormat('HH:mm:ss')}`
             const notifData = {
@@ -381,7 +381,7 @@ export default class OrderController {
               offerExpiresAt: expiresAt.toISO(),
             }
             const pushSent = await redis_helper.enqueuePushNotification(
-              selectedDriver.user.fcm_token,
+              selectedDriver.fcm_token,
               notifTitle,
               notifBody,
               notifData
@@ -473,7 +473,7 @@ export default class OrderController {
    */
   async show({ params, response, auth }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     await user.load('client')
     if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
 
@@ -515,7 +515,7 @@ export default class OrderController {
    */
   async index({ request, response, auth }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     await user.load('client')
     if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
 
@@ -547,7 +547,7 @@ export default class OrderController {
    */
   async cancel({ params, request, response, auth }: HttpContext) {
     await auth.check()
-    const user = auth.getUserOrFail()
+    const user = await auth.authenticate()
     await user.load('client')
     if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
 
@@ -672,16 +672,16 @@ export default class OrderController {
           .preload('user', (q) => q.select(['id', 'fcm_token']))
           .first()
 
-        if (client?.user?.fcm_token)
+        if (client?.fcm_token)
           await redis_helper.enqueuePushNotification(
-            client.user.fcm_token,
+            client.fcm_token,
             'Commande annulée',
             'La commande a été annulée.'
           )
 
-        if (driver?.user?.fcm_token)
+        if (driver?.fcm_token)
           await redis_helper.enqueuePushNotification(
-            driver.user.fcm_token,
+            driver.fcm_token,
             'Commande annulée',
             "La commande a été annulée par l'administrateur."
           )
@@ -790,7 +790,7 @@ export default class OrderController {
     // Option 1: Public (n'importe qui avec l'ID peut suivre) - Pas d'auth ici.
     // Option 2: Client propriétaire seulement - Décommenter les lignes auth ci-dessous.
     // await auth.check();
-    // const user = auth.getUserOrFail();
+    // const user = await auth.authenticate();
     // await user.load('client');
     // if (!user.client) return response.forbidden({ message: 'Client non trouvé.' });
     // ----------------------------------------------------
@@ -890,7 +890,7 @@ export default class OrderController {
       return response.ok(responseData)
     } catch (error) {
       logger.error({ err: error, orderId }, 'Erreur lors du tracking de la commande')
-      // Gérer le cas où l'ID n'est pas valide si besoin (ex: UUID invalide)
+      // Gérer le cas où l'ID n'est pas valide si besoin (ex:  invalide)
       if (error.code === 'E_ROW_NOT_FOUND') {
         // Si order non trouvé via query()
         return response.notFound({ message: 'Commande non trouvée.' })
@@ -933,12 +933,11 @@ export default class OrderController {
     const trx = await db.transaction()
 
     try {
-      // 1. Trouver la commande ET précharger les relations utiles (DANS transaction)
       const order = await Order.query({ client: trx })
         .where('id', orderId)
-        .preload('pickup_address') // Besoin pour log initial potentiel
-        .preload('packages') // Besoin pour vérification véhicule
-        .preload('status_logs', (q) => q.orderBy('changed_at', 'desc').limit(1)) // Pour statut actuel
+        .preload('pickup_address')
+        .preload('packages')
+        .preload('status_logs', (q) => q.orderBy('changed_at', 'desc').limit(1))
         .first()
 
       if (!order) {
@@ -946,7 +945,6 @@ export default class OrderController {
         return response.notFound({ message: `Commande ${orderId} non trouvée.` })
       }
       if (!order.pickup_address) {
-        // Vérification essentielle
         await trx.rollback()
         logger.error(`Order ${orderId} is missing pickup address for admin assignment.`)
         return response.internalServerError({
@@ -954,7 +952,6 @@ export default class OrderController {
         })
       }
 
-      // 2. Vérifier si la commande est assignable (PENDING et sans driver)
       const currentStatus = order.status_logs[0]?.status ?? null
       if (currentStatus !== OrderStatus.PENDING || order.driver_id) {
         await trx.rollback()
@@ -966,12 +963,9 @@ export default class OrderController {
             "Cette commande n'est pas assignable (vérifiez son statut et si un livreur n'est pas déjà assigné).",
         })
       }
-
-      // 3. Trouver le driver et ses véhicules actifs (DANS transaction)
       const driver = await Driver.query({ client: trx })
         .where('id', driver_id)
         //@ts-ignore
-        .preload('user', (q) => q.select(['id', 'fcm_token'])) // Sélectionne fcm_token pour notif
         .preload('vehicles', (vQuery) => vQuery.where('status', VehicleStatus.ACTIVE)) // Seulement les véhicules actifs
         .first()
 
@@ -980,8 +974,6 @@ export default class OrderController {
         return response.notFound({ message: `Livreur ${driver_id} non trouvé.` })
       }
 
-      // 4. --- Vérification Disponibilité et Véhicule du Driver ---
-      // a) Statut ACTIF
       const lastDriverStatus = await DriversStatus.query({ client: trx })
         .where('driver_id', driver_id)
         .orderBy('changed_at', 'desc')
@@ -993,14 +985,7 @@ export default class OrderController {
           message: `Le livreur ${driver_id} n'est pas ACTIF (Statut: ${lastDriverStatus?.status ?? 'inconnu'}).`,
         })
       }
-
-      // b) TODO: Vérification Disponibilité via Règles/Exceptions ?
-      // C'est complexe, on l'omet pour l'assignation manuelle, l'admin prend la responsabilité.
-      // Mais idéalement, on vérifierait `DriverAvailabilityService.isDriverAvailable(driver_id, DateTime.now())`.
-
-      // c) Vérification Véhicule Approprié
       if (!order.packages || order.packages.length === 0) {
-        // Ne devrait pas arriver si la validation order store est bonne
         await trx.rollback()
         logger.error(`Order ${orderId} has no package details for vehicle check.`)
         return response.internalServerError({ message: 'Erreur: Détails colis manquants.' })
@@ -1015,8 +1000,6 @@ export default class OrderController {
         driver.vehicles.length > 0 &&
         driver.vehicles.some(
           (vehicle) => vehicle.max_weight_kg === null || vehicle.max_weight_kg >= totalWeightG // Poids OK
-          // && (vehicle.max_volume_m3 == null || vehicle.max_volume_m3 >= totalVolumeM3) // Volume OK
-          // && (!frigo_needed || vehicle.has_refrigeration) // Frigo OK si besoin
         )
 
       if (!hasSuitableVehicle) {
@@ -1031,23 +1014,9 @@ export default class OrderController {
       logger.info(
         `Driver ${driver_id} availability and vehicle check PASSED for manual assign Order ${orderId}.`
       )
-      // --- Fin Vérification Driver ---
-
-      // --- Assignation & Mise à Jour Statuts ---
-
-      // 5. Assigner le driver à la commande
       order.driver_id = driver_id
-      // !! IMPORTANT: L'assignation par l'admin ne devrait PAS changer l'Order.status.
-      // C'est la création du log OrderStatusLog qui définit le nouveau statut.
 
-      // On prend la position du pickup car l'admin ne fournit pas la loc du driver.
-
-      // 8. TODO: Recalculer la route/ETA depuis la position ACTUELLE du driver vers le pickup ?
-      // Serait utile pour l'info client/driver mais complique. La route A->B existe déjà sur l'Order.
-
-      // 9. Notifier le Driver (Il DOIT être notifié !)
-
-      if (!driver.user?.fcm_token) {
+      if (!driver?.fcm_token) {
         await trx.rollback()
         logger.warn(`Driver ${driver_id} assigné mais n'a pas de FCM Token pour être notifié.`)
         return response.badRequest({
@@ -1059,7 +1028,7 @@ export default class OrderController {
         const notifBody = `Une course (ID: #${orderId.substring(0, 6)}...) vous a été assignée manuellement par un administrateur.`
         const notifData = { type: 'ADMIN_ASSIGNMENT', orderId: orderId }
         await redis_helper.enqueuePushNotification(
-          driver.user.fcm_token,
+          driver.fcm_token,
           notifTitle,
           notifBody,
           notifData
@@ -1204,7 +1173,7 @@ export default class OrderController {
         .where('id', orderId)
         // Précharger le driver si assigné pour notification et mise à jour statut
         //@ts-ignore
-        .preload('driver', (q) => q.preload('user', (u) => u.select(['id', 'fcm_token'])))
+        .preload('driver', (q) => q.select(['id', 'fcm_token']))
         .preload('status_logs', (q) => q.orderBy('changed_at', 'desc').limit(1)) // Dernier statut actuel
         .first()
 
@@ -1302,11 +1271,11 @@ export default class OrderController {
           )
 
           // Notifier le Driver TRES clairement de l'annulation par l'admin
-          if (order.driver?.user?.fcm_token) {
+          if (order.driver?.fcm_token) {
             // Utilise la relation préchargée
             try {
               await redis_helper.enqueuePushNotification(
-                order.driver.user.fcm_token,
+                order.driver.fcm_token,
                 'Mission Annulée (Admin)',
                 `La course #${orderId.substring(0, 6)}... a été annulée par un administrateur. Raison: ${reason_code}. Arrêtez votre progression.`,
                 { orderId: orderId, status: OrderStatus.CANCELLED, reason: reason_code }
@@ -1508,10 +1477,10 @@ export default class OrderController {
           )
 
           // Notify driver
-          if (order.driver?.user?.fcm_token) {
+          if (order.driver?.fcm_token) {
             try {
               await redis_helper.enqueuePushNotification(
-                order.driver.user.fcm_token,
+                order.driver.fcm_token,
                 'Mission Réussie (Admin)',
                 `La course #${orderId.substring(0, 6)}... a été marquée comme réussie. Raison: ${success_reason_code}${reason_details ? ` (${reason_details})` : ''}.`,
                 { orderId, status: OrderStatus.SUCCESS, reason: success_reason_code }
@@ -1755,10 +1724,10 @@ export default class OrderController {
           // await checkDriverSuspension(assignedDriverId, failure_reason_code);
 
           // Notify driver
-          if (order.driver?.user?.fcm_token) {
+          if (order.driver?.fcm_token) {
             try {
               await redis_helper.enqueuePushNotification(
-                order.driver.user.fcm_token,
+                order.driver.fcm_token,
                 'Mission Échouée (Admin)',
                 `La course #${orderId.substring(0, 6)}... a été marquée comme échouée. Raison: ${failure_reason_code}${reason_details ? ` (${reason_details})` : ''}. Aucun action supplémentaire requise.`,
                 { orderId, status: OrderStatus.FAILED, reason: failure_reason_code }
