@@ -3,7 +3,6 @@ import logger from '@adonisjs/core/services/logger'
 import env from '#start/env'
 import admin from 'firebase-admin'
 import User from '#models/user' // Pour la fonction de nettoyage
-import fs from 'node:fs'
 
 let isFirebaseInitialized = false
 
@@ -66,7 +65,8 @@ class NotificationHelper {
     fcmToken: string,
     title: string,
     body: string,
-    data?: { [key: string]: any } // Accepte n'importe quel objet
+    data?: { [key: string]: any }, // Accepte n'importe quel objet
+    options: { priority?: 'high' | 'normal'; type?: string } = {}
   ): Promise<SendNotificationResult> {
     if (!isFirebaseInitialized) {
       initializeFirebaseApp();
@@ -91,18 +91,39 @@ class NotificationHelper {
       }
     }
 
+    const effectiveType = options.type || data?.type || 'default'; // Utilise type des options, puis data, puis défaut
+    const isHighPriority = options.priority === 'high' || effectiveType === 'NEW_MISSION_OFFER'; // Exemple
+
+    // Récupère les IDs/sons depuis l'environnement avec fallback
+    const androidChannelId = isHighPriority
+      ? env.get('ANDROID_HIGH_PRIORITY_CHANNEL_ID', 'high_priority_channel')
+      // : Env.get('ANDROID_CRITICAL_ALERTS_CHANNEL_ID', 'critical_alerts'); // Ou un autre canal par défaut
+      : env.get('ANDROID_DEFAULT_CHANNEL_ID', 'default_channel'); // Utilisons le canal par défaut pour les non-urgents
+
+    const soundAndroid = isHighPriority
+      ? env.get('FCM_OFFER_SOUND_ANDROID', 'custom_offer_sound')
+      : env.get('FCM_DEFAULT_SOUND_ANDROID', 'default');
+
+    const soundIOS = isHighPriority
+      ? env.get('FCM_OFFER_SOUND_IOS', 'custom_offer_sound.wav')
+      : env.get('FCM_DEFAULT_SOUND_IOS', 'default');
+
+    const androidPriority1 = isHighPriority ? 'high' : 'normal';
+    const androidPriority2 = isHighPriority ? 'high' : 'default';
+    const apnsPriority = isHighPriority ? '10' : '5';
+
     // Définit la structure du message avec les options Android/iOS
     const message: admin.messaging.Message = {
       notification: { title, body },
       android: {
-        priority: 'high',
+        priority: androidPriority1,
         notification: {
-          channelId: 'critical_alerts', // Canal pour notifications critiques
-          sound: 'default', // Son par défaut
+          channelId: androidChannelId, // Canal pour notifications critiques
+          sound: soundAndroid, // Son par défaut
           visibility: 'public', // Visible sur écran verrouillé
           vibrateTimingsMillis: [1000],
-          priority: 'high',
-          clickAction: 'OPEN_APP',
+          priority: androidPriority2,
+          // clickAction: 'OPEN_APP',
           notificationCount: 1,
           // TODO: Définir un Channel ID si nécessaire pour Android 8+
           // channelId: env.get('ANDROID_NOTIFICATION_CHANNEL_ID', 'default_channel')
@@ -111,12 +132,12 @@ class NotificationHelper {
       apns: {
         payload: {
           aps: {
-            sound: 'default',
+            sound: soundIOS,
             badge: 1, // Réinitialiser le badge ou incrémenter? À gérer côté app mobile.
           },
         },
         // Option pour forcer l'affichage en arrière-plan sur iOS 10+
-        headers: { 'apns-priority': '10', 'apns-push-type': 'alert' },
+        headers: { 'apns-priority': apnsPriority, 'apns-push-type': 'alert' },
       },
       token: fcmToken,
       data: data ? this.stringifyDataPayload(data) : {}, // Assure que toutes les data sont string

@@ -9,8 +9,6 @@ import { cuid } from '@adonisjs/core/helpers'
 import Driver from '#models/driver'
 import DriversStatus, { DriverStatus } from '#models/drivers_status'
 import DriverAvailabilityChecker from '#services/driver_availability_checker'
-import NotificationWorker from './notification_worker.js'
-import { NotificationHelper } from '#services/notification_helper'
 import redis_helper from '#services/redis_helper'
 
 // --- Configuration ---
@@ -47,6 +45,7 @@ export default class AvailabilitySyncWorker extends BaseCommand {
   private async synchronizeAndScheduleNext() {
     if (!this.isRunning) return
     logger.info(`Starting sync cycle (Worker #${WORKER_ID})...`)
+
     try {
       await this.synchronizeDriversPartition()
     } catch (error) {

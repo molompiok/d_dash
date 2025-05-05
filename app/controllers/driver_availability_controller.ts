@@ -652,6 +652,7 @@ export default class DriverAvailabilityController {
 
 
       // C. Traitement des Mises à Jour (Activation/Désactivation/Changement heures)
+      const updatedRuleIds = new Set<string>();
       if (rulesToUpdate.length > 0) {
         logger.debug({ driverId, count: rulesToUpdate.length }, 'Updating availability rules.');
         // Itère sur chaque règle à mettre à jour
@@ -671,6 +672,7 @@ export default class DriverAvailabilityController {
             // C'est complexe dans un batch, idéalement le frontend pré-valide,
             // mais une sécurité ici serait bien (non implémenté pour la concision)
             await rule.save(); // Sauvegarde via la transaction
+            updatedRuleIds.add(id); // Marquer comme traitée
           } else {
             logger.warn({ driverId, ruleId: id }, "Rule ID provided for update not found or doesn't belong to driver.");
             // Ignorer silencieusement ou retourner une erreur ? Ignorer pour l'instant.
@@ -680,23 +682,70 @@ export default class DriverAvailabilityController {
 
       // D. Traitement des Créations
       if (rulesToCreate.length > 0) {
-        logger.debug({ driverId, count: rulesToCreate.length }, 'Creating new availability rules.');
-        const rulesToInsert = rulesToCreate.map(ruleData => ({
-          id: cuid(), // Génère un nouvel ID
-          driver_id: driverId, // Associe au driver actuel
-          ...ruleData,
-          is_active: true, // Force active à la création (ou utiliser valeur par défaut du modèle?)
-        }));
+        logger.debug({ driverId, count: rulesToCreate.length }, 'Processing rules to potentially create or reactivate.');
+        const rulesToActuallyInsert: {
+          id: string;
+          driver_id: string;
+          day_of_week: number; // Utilisez number directement si vine.number() le renvoie
+          start_time: string;
+          end_time: string;
+          is_active: boolean;
+        }[] = []
 
-        // !! Validation de chevauchement ici lors de la Création !!
-        // Pour chaque `ruleData` dans `rulesToCreate`:
-        //    1. Récupérer toutes les règles *finales* (existantes mises à jour + autres nouvelles) pour `ruleData.day_of_week`.
-        //    2. Vérifier si `ruleData` chevauche une de ces règles finales.
-        //    3. Si oui, rollback et erreur 400.
-        // (Complexe à implémenter proprement ici sans surcharger, dépend de votre niveau d'exigence sur la validation backend)
+        for (const ruleData of rulesToCreate) {
+          const { day_of_week, start_time, end_time } = ruleData;
 
-        // Insertion en masse si possible (si pas de validation complexe nécessaire)
-        await DriverAvailabilityRule.createMany(rulesToInsert, { client: trx });
+          // 1. Chercher une règle INACTIVE existante qui correspond PARFAITEMENT
+          const reusableInactiveRule = await DriverAvailabilityRule.query({ client: trx })
+            .where('driver_id', driverId)
+            .where('day_of_week', day_of_week)
+            .where('start_time', start_time) // Recherche correspondance exacte
+            .where('end_time', end_time)
+            .where('is_active', false) // Doit être inactive
+            .first();
+
+          if (reusableInactiveRule) {
+            // 2.a. Règle inactive trouvée -> La réactiver
+            logger.debug({ driverId, ruleId: reusableInactiveRule.id }, 'Reactivating existing inactive rule.');
+            if (updatedRuleIds.has(reusableInactiveRule.id)) {
+              // Gérer cas rare: une règle inactive a DÉJÀ été mise à jour (potentiellement désactivée à nouveau ?)
+              // dans la même transaction par `rulesToUpdate`. Décider quelle action prime.
+              logger.warn(`Rule ${reusableInactiveRule.id} was already processed in rulesToUpdate. Prioritizing reactivation.`);
+              // On force la réactivation si la création est demandée.
+            }
+            reusableInactiveRule.is_active = true;
+            // Doit-on vérifier le chevauchement ici aussi? OUI, car même si les heures sont identiques,
+            // d'autres règles actives ont pu être ajoutées/modifiées pour ce jour.
+            // Check overlap before saving reactivated rule (complexité mentionnée avant)
+
+            await reusableInactiveRule.save();
+            updatedRuleIds.add(reusableInactiveRule.id); // Marquer comme traitée
+
+          } else {
+            // 2.b. Aucune règle inactive réutilisable trouvée -> Ajouter à la liste pour création
+            // Validation chevauchement ICI avant d'ajouter à la liste d'insertion finale.
+            // Fetch toutes les règles potentiellement *actives* à la fin de la transaction pour ce jour
+            // (existantes + mises à jour + autres créations potentielles). C'est le point complexe.
+            // **Simplification pour l'instant : on se fie à la validation frontend**
+            // et on ajoute à la liste. Le risque est une erreur BDD si contrainte unique.
+
+            rulesToActuallyInsert.push({
+              id: cuid(),
+              driver_id: driverId,
+              day_of_week: ruleData.day_of_week,
+              start_time: ruleData.start_time,
+              end_time: ruleData.end_time,
+              is_active: true,
+              // N'incluez PAS 'created_at' ou 'updated_at' ici
+            });
+          }
+        }
+
+        // 3. Créer en masse les règles qui n'ont pas pu être réutilisées
+        if (rulesToActuallyInsert.length > 0) {
+          logger.debug({ driverId, count: rulesToActuallyInsert.length }, 'Creating new rules after checking for reuse.');
+          await DriverAvailabilityRule.createMany(rulesToActuallyInsert, { client: trx });
+        }
       }
 
       // Si tout s'est bien passé

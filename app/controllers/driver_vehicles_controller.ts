@@ -12,6 +12,8 @@ import { deleteFiles } from '#services/media/DeleteFiles'
 import Driver from '#models/driver'
 import { Logger } from '@adonisjs/core/logger'
 import { createFiles } from '#services/media/CreateFiles'
+import { NotificationHelper } from '#services/notification_helper'
+import redis_helper from '#services/redis_helper'
 
 const expirationDateRule = vine.string().transform((value: string) => {
   if (!value.match(/^\d{4}-\d{2}-\d{2}$/)) {
@@ -225,20 +227,20 @@ export default class DriverVehicleController {
         }
       })
 
-      licenseImageUrls = await createFiles({
-        request: request,
-        table_id: vehicleId, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
-        table_name: 'driver_vehicles',
-        column_name: 'license_image',
-        options: {
-          maxSize: 5 * 1024 * 1024, // Exemple : 5MB max par fichier
-          // resize: { width: 800, height: 600 },
-          extname: ['jpg', 'jpeg', 'png', 'webp'],
-          compress: 'img',
-          min: 1, // Exemple: au moins 1 image requise
-          throwError: true // Pour renvoyer une erreur claire si validation échoue
-        }
-      })
+      // licenseImageUrls = await createFiles({
+      //   request: request,
+      //   table_id: vehicleId, // Utilise un ID prévisible (mais attention aux collisions potentielles si format pas assez unique) - peut-être mieux: temporaire ou table_id sera l'ID du véhicule une fois créé ? On va utiliser l'ID du *futur* véhicule pour lier.
+      //   table_name: 'driver_vehicles',
+      //   column_name: 'license_image',
+      //   options: {
+      //     maxSize: 5 * 1024 * 1024, // Exemple : 5MB max par fichier
+      //     // resize: { width: 800, height: 600 },
+      //     extname: ['jpg', 'jpeg', 'png', 'webp'],
+      //     compress: 'img',
+      //     min: 1, // Exemple: au moins 1 image requise
+      //     throwError: true // Pour renvoyer une erreur claire si validation échoue
+      //   }
+      // })
 
       const now = DateTime.utc()
 
@@ -260,7 +262,7 @@ export default class DriverVehicleController {
           max_volume_m3: payload.max_volume_m3,
           vehicle_image: vehicleImageUrls || [], // Sera mis à jour juste après avec les URLs finales
           vehicle_document: vehicleDocumentUrls || [], // Sera mis à jour juste après avec les URLs finales
-          license_image: licenseImageUrls || [], // Sera mis à jour juste après avec les URLs finales
+          license_image: [], // Sera mis à jour juste après avec les URLs finales
         },
         { client: trx }
       ) // Utilise la transaction
@@ -598,11 +600,26 @@ export default class DriverVehicleController {
         await trx.rollback()
         return response.notFound({ message: 'Véhicule non trouvé.' })
       }
+      const driver = await Driver.find(vehicle.driver_id, { client: trx }) // Cherche ENSUITE
+      if (!driver) {
+        await trx.rollback()
+        return response.notFound({ message: 'Conducteur non trouvé.' })
+      }
       const oldStatus = vehicle.status
       vehicle.status = status
-      await vehicle.save()
+      await vehicle.useTransaction(trx).save()
       // TODO: AuditLog, Notification?
       await trx.commit()
+      let fcmToken = driver.fcm_token
+      logger.info(`FCM Token: ${fcmToken}`)
+      let title = 'Statut véhicule mis à jour by redis_helper'
+      let body = `Le statut de votre véhicule ${vehicle.license_plate} a été mis à jour par l'admin ${adminUser.full_name}`
+      if (fcmToken) {
+        redis_helper.enqueuePushNotification(fcmToken, title, body)
+      } else {
+        logger.warn(`No FCM token found for vehicle ${vehicle.id}`)
+      }
+
 
       logger.info(
         `Statut véhicule ${vehicleId} mis à jour (${oldStatus} -> ${status}) par admin ${adminUser.id}`

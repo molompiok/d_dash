@@ -385,7 +385,7 @@ export default class NotificationWorker extends BaseCommand {
       return { success: false, error: parseError, code: 'JSON_PARSE_ERROR', isTokenInvalid: true } // ACK car data mauvaise
     }
 
-    const result = await NotificationHelper.sendPushNotification(fcmToken, title, body, dataPayload)
+    const result = await NotificationHelper.sendPushNotification(fcmToken, title, body, dataPayload, { priority: 'high' })
     return result
   }
 

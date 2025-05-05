@@ -42,6 +42,8 @@ router
   .prefix('/driver')
   .use(middleware.auth({ guards: ['api'] }))
 
+router.patch('/vehicles/:id/status', [DriverVehicleController, 'admin_update_status']).use(middleware.auth({ guards: ['api'] }))
+
 router
   .group(() => {
     router.get('/availability/rules', [DriverAvailabilityController, 'list_rules'])

@@ -1,0 +1,5 @@
+2025-05-04 05:55:06.969 +00:00: {"level":30,"time":1746338106918,"pid":2238009,"hostname":"DESKTOP-DNCSKFJ","name":"D-Dash","msg":"Firebase Admin SDK initialisé."}
+2025-05-04 05:55:06.969 +00:00: {"level":30,"time":1746338106919,"pid":2238009,"hostname":"DESKTOP-DNCSKFJ","name":"D-Dash","msg":"🚀 Notification Worker (notifworker_2238009_ma98mb3g) starting..."}
+2025-05-04 05:55:06.969 +00:00: {"level":30,"time":1746338106934,"pid":2238009,"hostname":"DESKTOP-DNCSKFJ","name":"D-Dash","msg":"Redis Stream consumer group 'notification_workers_group' already exists."}
+2025-05-04 05:55:06.969 +00:00: {"level":30,"time":1746338106935,"pid":2238009,"hostname":"DESKTOP-DNCSKFJ","name":"D-Dash","msg":"Listening... Claim check frequency: 5 loops."}
+2025-05-04 06:00:23.390 +00:00: {"level":30,"time":1746338422758,"pid":2238009,"hostname":"DESKTOP-DNCSKFJ","name":"D-Dash","msg":"Received SIGINT. Shutting down worker (notifworker_2238009_ma98mb3g) gracefully..."}

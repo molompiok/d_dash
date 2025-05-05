@@ -20,7 +20,6 @@ type EventData = {
 }
 
 // --- Helpers ---
-import NotificationHelper from '#services/notification_helper'
 import redis_helper from '#services/redis_helper'
 
 // --- Config ---
@@ -320,7 +319,7 @@ export default class AssignmentWorker extends BaseCommand {
         order.offer_expires_at = expiresAt
         await order.save() // Sauvegarde via trx
 
-        if (selectedDriver.user.fcm_token) {
+        if (selectedDriver.fcm_token) {
           const notifTitle = 'Nouvelle Mission'
           const notifBody = `Course #${orderId.substring(0, 6)} (tentative ${attemptCount})... Rém: ${order.remuneration} EUR. Exp: ${expiresAt.toFormat('HH:mm:ss')}`
           const notifData = {
@@ -329,7 +328,7 @@ export default class AssignmentWorker extends BaseCommand {
             offerExpiresAt: expiresAt.toISO(),
           }
           const pushSent = await redis_helper.enqueuePushNotification(
-            selectedDriver.user.fcm_token,
+            selectedDriver.fcm_token,
             notifTitle,
             notifBody,
             notifData
