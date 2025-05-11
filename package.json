@@ -68,7 +68,8 @@
     "luxon": "^3.6.1",
     "pg": "^8.14.1",
     "reflect-metadata": "^0.2.2",
-    "sharp": "^0.34.1"
+    "sharp": "^0.34.1",
+    "wkx": "^0.5.0"
   },
   "hotHook": {
     "boundaries": [

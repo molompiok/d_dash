@@ -10,6 +10,7 @@ import Driver from '#models/driver'
 import DriversStatus, { DriverStatus } from '#models/drivers_status'
 import DriverAvailabilityChecker from '#services/driver_availability_checker'
 import redis_helper from '#services/redis_helper'
+import { NotificationType } from '#models/notification'
 
 // --- Configuration ---
 const SYNC_INTERVAL_MS = Number.parseInt(process.env.AVAILABILITY_SYNC_INTERVAL_MS || '20000', 10) // 20s
@@ -74,7 +75,7 @@ export default class AvailabilitySyncWorker extends BaseCommand {
       logger.trace(`Worker #${WORKER_ID}: Processing page ${currentPage}`)
       const driverBatch = await Driver.query()
         .select('id') // Sélectionne seulement l'ID pour la pagination
-        .whereRaw('id % ? = ?', [TOTAL_WORKERS, WORKER_ID]) // Partitionnement efficace
+        .whereRaw('abs(hashtext(id)) % ? = ?', [TOTAL_WORKERS, WORKER_ID])// Partitionnement efficace
         .orderBy('id')
         .paginate(currentPage, BATCH_SIZE)
 
@@ -127,6 +128,11 @@ export default class AvailabilitySyncWorker extends BaseCommand {
         .where('driver_id', driverId)
         .orderBy('changed_at', 'desc')
         .first()
+      const driver = await Driver.find(driverId)
+      if (!driver) {
+        logger.error(`Driver not found for ${driverId}`)
+        return
+      }
       currentDbStatus = lastStatusRecord?.status ?? DriverStatus.INACTIVE
 
       // 2. Ignorer si statut non pertinent pour synchro planning
@@ -171,11 +177,19 @@ export default class AvailabilitySyncWorker extends BaseCommand {
             },
             { client: trx }
           )
+
+          const fcmToken = driver.fcm_token
+          if (!fcmToken) {
+            logger.warn({ ...logContext }, 'No FCM token found for driver')
+            return
+          }
           await redis_helper.enqueuePushNotification(
-            driverId,
-            'Status de disponibilité mis à jour',
-            `Votre statut de disponibilité a été mis à jour à ${targetStatus === DriverStatus.ACTIVE ? 'ACTIF' : 'INACTIF'}`,
-            { driverId, status: targetStatus }
+            {
+              fcmToken,
+              title: 'Status de disponibilité mis à jour',
+              body: `Votre statut de disponibilité a été mis à jour à ${targetStatus === DriverStatus.ACTIVE ? 'ACTIF' : 'INACTIF'}`,
+              data: { driverId, status: targetStatus, type: NotificationType.SCHEDULE_REMINDER },
+            }
           )
           await trx.commit()
           logger.info({ ...logContext, targetStatus }, `Status updated successfully`)

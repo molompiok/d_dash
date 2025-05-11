@@ -32,6 +32,7 @@ import OrderStatusLog from '#models/order_status_log'
 import env from '#start/env'
 import Client from '#models/client'
 import redis_helper from '#services/redis_helper'
+import { NotificationType } from '#models/notification'
 // --- Fin Imports Validateurs ---
 
 const cancelOrderValidator = vine.compile(
@@ -376,16 +377,17 @@ export default class OrderController {
             const notifTitle = 'Nouvelle Mission Disponible'
             const notifBody = `Course #${newOrder.id.substring(0, 6)}... Rém: ${newOrder.remuneration} ${newOrder.currency}. Acceptez avant ${expiresAt.toFormat('HH:mm:ss')}`
             const notifData = {
-              type: 'NEW_MISSION_OFFER',
+              type: NotificationType.NEW_MISSION_OFFER,
               orderId: newOrder.id,
               offerExpiresAt: expiresAt.toISO(),
             }
-            const pushSent = await redis_helper.enqueuePushNotification(
-              selectedDriver.fcm_token,
-              notifTitle,
-              notifBody,
-              notifData
-            )
+            const pushSent = await redis_helper.enqueuePushNotification({
+              fcmToken: selectedDriver.fcm_token,
+              title: notifTitle,
+              body: notifBody,
+              data: notifData,
+              // type: NotificationType.NEW_MISSION_OFFER,
+            })
             if (pushSent) {
               logger.info(
                 `Offre initiale Order ${newOrder.id} notifiée Driver ${selectedDriver.id}`
@@ -492,6 +494,8 @@ export default class OrderController {
         ) // Charger le driver et user associé (sélection de champs)
         .preload('status_logs', (logQuery) => logQuery.orderBy('changed_at', 'desc')) // Historique des statuts
         .first()
+
+      logger.info({ order }, 'Commande récupérée')
 
       if (!order) {
         return response.notFound({ message: 'Commande non trouvée.' })
@@ -673,18 +677,20 @@ export default class OrderController {
           .first()
 
         if (client?.fcm_token)
-          await redis_helper.enqueuePushNotification(
-            client.fcm_token,
-            'Commande annulée',
-            'La commande a été annulée.'
-          )
+          await redis_helper.enqueuePushNotification({
+            fcmToken: client.fcm_token,
+            title: 'Commande annulée',
+            body: 'La commande a été annulée.',
+            data: { orderId: order.id, status: OrderStatus.CANCELLED, type: NotificationType.MISSION_UPDATE },
+          })
 
         if (driver?.fcm_token)
-          await redis_helper.enqueuePushNotification(
-            driver.fcm_token,
-            'Commande annulée',
-            "La commande a été annulée par l'administrateur."
-          )
+          await redis_helper.enqueuePushNotification({
+            fcmToken: driver.fcm_token,
+            title: 'Commande annulée',
+            body: "La commande a été annulée par l'administrateur.",
+            data: { orderId: order.id, status: OrderStatus.CANCELLED, type: NotificationType.MISSION_UPDATE },
+          })
       }
 
       await trx.commit() // Valide l'annulation
@@ -996,11 +1002,11 @@ export default class OrderController {
       )
       // TODO: Calculer volume, vérifier 'frigo_needed' etc.
 
-      const hasSuitableVehicle =
-        driver.vehicles.length > 0 &&
-        driver.vehicles.some(
-          (vehicle) => vehicle.max_weight_kg === null || vehicle.max_weight_kg >= totalWeightG // Poids OK
-        )
+      const hasSuitableVehicle = driver.vehicles.length > 0
+      // &&
+      // driver.vehicles.some(
+      //   (vehicle) => vehicle.max_weight_kg === null || vehicle.max_weight_kg >= totalWeightG // Poids OK
+      // )
 
       if (!hasSuitableVehicle) {
         await trx.rollback()
@@ -1026,13 +1032,13 @@ export default class OrderController {
       try {
         const notifTitle = 'Nouvelle Mission Assignée'
         const notifBody = `Une course (ID: #${orderId.substring(0, 6)}...) vous a été assignée manuellement par un administrateur.`
-        const notifData = { type: 'ADMIN_ASSIGNMENT', orderId: orderId }
-        await redis_helper.enqueuePushNotification(
-          driver.fcm_token,
-          notifTitle,
-          notifBody,
-          notifData
-        )
+        const notifData = { type: NotificationType.NEW_MISSION_OFFER, orderId: orderId }
+        await redis_helper.enqueuePushNotification({
+          fcmToken: driver.fcm_token,
+          title: notifTitle,
+          body: notifBody,
+          data: notifData,
+        })
         logger.info(`Notification d'assignation manuelle envoyée au driver ${driver_id}.`)
       } catch (notifError) {
         await trx.rollback()
@@ -1274,12 +1280,12 @@ export default class OrderController {
           if (order.driver?.fcm_token) {
             // Utilise la relation préchargée
             try {
-              await redis_helper.enqueuePushNotification(
-                order.driver.fcm_token,
-                'Mission Annulée (Admin)',
-                `La course #${orderId.substring(0, 6)}... a été annulée par un administrateur. Raison: ${reason_code}. Arrêtez votre progression.`,
-                { orderId: orderId, status: OrderStatus.CANCELLED, reason: reason_code }
-              )
+              await redis_helper.enqueuePushNotification({
+                fcmToken: order.driver.fcm_token,
+                title: 'Mission Annulée (Admin)',
+                body: `La course #${orderId.substring(0, 6)}... a été annulée par un administrateur. Raison: ${reason_code}. Arrêtez votre progression.`,
+                data: { orderId: orderId, status: OrderStatus.CANCELLED, reason: reason_code, type: NotificationType.MISSION_UPDATE },
+              })
             } catch (notifError) {
               logger.error(
                 { err: notifError, orderId, driverId: assignedDriverId },
@@ -1479,12 +1485,12 @@ export default class OrderController {
           // Notify driver
           if (order.driver?.fcm_token) {
             try {
-              await redis_helper.enqueuePushNotification(
-                order.driver.fcm_token,
-                'Mission Réussie (Admin)',
-                `La course #${orderId.substring(0, 6)}... a été marquée comme réussie. Raison: ${success_reason_code}${reason_details ? ` (${reason_details})` : ''}.`,
-                { orderId, status: OrderStatus.SUCCESS, reason: success_reason_code }
-              )
+              await redis_helper.enqueuePushNotification({
+                fcmToken: order.driver.fcm_token,
+                title: 'Mission Réussie (Admin)',
+                body: `La course #${orderId.substring(0, 6)}... a été marquée comme réussie. Raison: ${success_reason_code}${reason_details ? ` (${reason_details})` : ''}.`,
+                data: { orderId, status: OrderStatus.SUCCESS, reason: success_reason_code, type: NotificationType.MISSION_UPDATE },
+              })
               logger.info(
                 `Notification sent to driver ${assignedDriverId} for successful order ${orderId}.`
               )
@@ -1726,12 +1732,12 @@ export default class OrderController {
           // Notify driver
           if (order.driver?.fcm_token) {
             try {
-              await redis_helper.enqueuePushNotification(
-                order.driver.fcm_token,
-                'Mission Échouée (Admin)',
-                `La course #${orderId.substring(0, 6)}... a été marquée comme échouée. Raison: ${failure_reason_code}${reason_details ? ` (${reason_details})` : ''}. Aucun action supplémentaire requise.`,
-                { orderId, status: OrderStatus.FAILED, reason: failure_reason_code }
-              )
+              await redis_helper.enqueuePushNotification({
+                fcmToken: order.driver.fcm_token,
+                title: 'Mission Échouée (Admin)',
+                body: `La course #${orderId.substring(0, 6)}... a été marquée comme échouée. Raison: ${failure_reason_code}${reason_details ? ` (${reason_details})` : ''}. Aucun action supplémentaire requise.`,
+                data: { orderId, status: OrderStatus.FAILED, reason: failure_reason_code, type: NotificationType.MISSION_UPDATE },
+              })
               logger.info(
                 `Notification sent to driver ${assignedDriverId} for failed order ${orderId}.`
               )

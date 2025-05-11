@@ -14,6 +14,7 @@ import { Logger } from '@adonisjs/core/logger'
 import { createFiles } from '#services/media/CreateFiles'
 import { NotificationHelper } from '#services/notification_helper'
 import redis_helper from '#services/redis_helper'
+import { NotificationType } from '#models/notification'
 
 const expirationDateRule = vine.string().transform((value: string) => {
   if (!value.match(/^\d{4}-\d{2}-\d{2}$/)) {
@@ -612,15 +613,18 @@ export default class DriverVehicleController {
       await trx.commit()
       let fcmToken = driver.fcm_token
       logger.info(`FCM Token: ${fcmToken}`)
-      let title = 'Statut véhicule mis à jour by redis_helper'
-      let body = `Le statut de votre véhicule ${vehicle.license_plate} a été mis à jour par l'admin ${adminUser.full_name}`
+      let title = 'Statut véhicule mis à jour'
+      let body = `Le statut de votre véhicule ${vehicle.license_plate} a été mis à jour.`
       if (fcmToken) {
-        redis_helper.enqueuePushNotification(fcmToken, title, body)
+        redis_helper.enqueuePushNotification({
+          fcmToken,
+          title,
+          body,
+          data: { vehicle_id: vehicle.id, type: NotificationType.VEHICLE_STATUS_UPDATE },
+        })
       } else {
         logger.warn(`No FCM token found for vehicle ${vehicle.id}`)
       }
-
-
       logger.info(
         `Statut véhicule ${vehicleId} mis à jour (${oldStatus} -> ${status}) par admin ${adminUser.id}`
       )

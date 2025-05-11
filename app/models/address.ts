@@ -1,7 +1,9 @@
 import { DateTime } from 'luxon'
-import {  column } from '@adonisjs/lucid/orm'
-import GeoService from '#services/geo_service'
+import { column, hasOne } from '@adonisjs/lucid/orm'
+import GeoService, { GeoJsonPoint } from '#services/geo_service'
 import BaseModel from './base_model.js'
+import Order from './order.js'
+import type { HasOne } from '@adonisjs/lucid/types/relations'
 
 export default class Address extends BaseModel {
   @column({ isPrimary: true })
@@ -23,8 +25,8 @@ export default class Address extends BaseModel {
   declare country: string
 
   @column({
-    consume: GeoService.wktToPointAsGeoJSON,
-    prepare: GeoService.pointToSQL,
+    consume: (value: string | null): GeoJsonPoint | null => GeoService.hexWkbToGeoJsonPoint(value),
+    prepare: (value: GeoJsonPoint | null): any => value ? GeoService.geoJsonPointToSQL(value) : null,
   })
   declare coordinates: { type: 'Point'; coordinates: number[] }
 
@@ -39,4 +41,16 @@ export default class Address extends BaseModel {
 
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updated_at: DateTime | null
+
+  // Toutes les commandes où cette adresse est utilisée comme **pickup**
+  @hasOne(() => Order, {
+    foreignKey: 'pickup_address_id',
+  })
+  declare pickup_order: HasOne<typeof Order>
+
+  // Toutes les commandes où cette adresse est utilisée comme **delivery**
+  @hasOne(() => Order, {
+    foreignKey: 'delivery_address_id',
+  })
+  declare delivery_order: HasOne<typeof Order>
 }

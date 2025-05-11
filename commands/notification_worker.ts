@@ -8,6 +8,7 @@ import NotificationHelper, {
   type SendNotificationResult,
 } from '#services/notification_helper'
 import { setTimeout as sleep } from 'node:timers/promises' // Import pour await sleep
+import { NotificationType } from '#models/notification'
 
 // --- Configuration ---
 const NOTIFICATION_STREAM_KEY = env.get('REDIS_NOTIFICATION_STREAM', 'notifications_queue_stream')
@@ -297,7 +298,6 @@ export default class NotificationWorker extends BaseCommand {
         for (let i = 0; i < fieldsArray.length; i += 2) {
           messageData[fieldsArray[i]] = fieldsArray[i + 1]
         }
-
         // Récupérer le nombre de tentatives précédentes si réclamé
         let deliveryCount = 1 // Première livraison par défaut
         if (isClaimed) {
@@ -366,7 +366,7 @@ export default class NotificationWorker extends BaseCommand {
   private async processNotificationTask(taskData: {
     [key: string]: string
   }): Promise<SendNotificationResult> {
-    const { fcmToken, title, body, data: dataString } = taskData
+    const { fcmToken, title, body, data: dataString, type } = taskData
 
     if (!fcmToken || !title || !body) {
       logger.error({ taskData }, 'Invalid notification task data.')
@@ -385,7 +385,13 @@ export default class NotificationWorker extends BaseCommand {
       return { success: false, error: parseError, code: 'JSON_PARSE_ERROR', isTokenInvalid: true } // ACK car data mauvaise
     }
 
-    const result = await NotificationHelper.sendPushNotification(fcmToken, title, body, dataPayload, { priority: 'high' })
+    const result = await NotificationHelper.sendPushNotification({
+      fcmToken,
+      title,
+      body,
+      data: dataPayload || {},
+      type: type as NotificationType,
+    })
     return result
   }
 

@@ -2,6 +2,7 @@ import router from '@adonisjs/core/services/router'
 import { middleware } from './kernel.js'
 import OrderController from '#controllers/orders_controller'
 import DriverVehicleController from '#controllers/driver_vehicles_controller'
+import MissionController from '#controllers/missions_controller'
 
 const DriverStatusController = () => import('#controllers/driver_status_controller')
 const OrderTrackingController = () => import('#controllers/SSE/order_trackings_controller')
@@ -42,7 +43,12 @@ router
   .prefix('/driver')
   .use(middleware.auth({ guards: ['api'] }))
 
-router.patch('/vehicles/:id/status', [DriverVehicleController, 'admin_update_status']).use(middleware.auth({ guards: ['api'] }))
+
+router.group(() => {
+  router.patch('/documents/:id/status', [UserDocumentController, 'admin_update_status'])
+  router.patch('/vehicles/:id/status', [DriverVehicleController, 'admin_update_status'])
+})
+  .use(middleware.auth({ guards: ['api'] }))
 
 router
   .group(() => {
@@ -67,6 +73,8 @@ router
 // Public SSE route for tracking
 router.get('/track-stream/:id', [OrderTrackingController, 'stream'])
 
+router.get('/missions/current', [MissionController, 'show'])
+
 router
   .group(() => {
     router.patch('/status', [DriverStatusController, 'update_status'])
@@ -74,6 +82,14 @@ router
     router.get('/status', [DriverStatusController, 'get_current_status'])
   })
   .prefix('/driver')
+  .use(middleware.auth({ guards: ['api'] }))
+
+
+
+router.group(() => {
+  router.post('/orders/:id/assign', [OrderController, 'admin_assign_driver'])
+})
+  .prefix('/admin')
   .use(middleware.auth({ guards: ['api'] }))
 
 router.get('/uploads/*', ({ request, response }) => {

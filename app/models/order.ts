@@ -10,6 +10,7 @@ import OrderTransaction from './order_transaction.js'
 import Package from './package.js'
 import Client from './client.js'
 import BaseModel from './base_model.js'
+import db from '@adonisjs/lucid/services/db'
 export default class Order extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -42,11 +43,12 @@ export default class Order extends BaseModel {
   declare currency: string
 
   @column({
-    consume: GeoService.wktToLineString,
-    // prepare: (value) => {
-    //   const wkt = GeoService.pointsToLineString(value)
-    //   return db.raw(`ST_GeomFromText(?, 4326)`, [wkt])
-    // },
+    consume: (valueFromDb: string | null) => GeoService.ewkbHexToGeoJsonLineString(valueFromDb),
+    prepare: (value: { type: 'LineString'; coordinates: number[][] } | null) => {
+      if (!value) return null;
+      const wkt = GeoService.pointsToLineString(value); // Assurez-vous que pointsToLineString existe et fonctionne
+      return db.raw(`ST_GeomFromText(?, 4326)`, [wkt]); // db doit être importé
+    },
   })
   declare route_geometry: { type: 'LineString'; coordinates: number[][] } | null
 
@@ -68,7 +70,10 @@ export default class Order extends BaseModel {
   declare order_number_in_batch: number | null
 
   @column()
-  declare confirmation_code: string | null
+  declare confirmation_delivery_code: string | null
+
+  @column()
+  declare confirmation_pickup_code: string | null
 
   @column()
   declare client_fee: number
@@ -114,25 +119,36 @@ export default class Order extends BaseModel {
   })
   declare offered_driver: BelongsTo<typeof Driver>
 
+  @belongsTo(() => Driver, {
+    foreignKey: 'driver_id',
+  })
+  declare driver: BelongsTo<typeof Driver>
+
   @belongsTo(() => Client, { foreignKey: 'client_id' })
   declare client: BelongsTo<typeof Client>
 
   @hasMany(() => Package, { foreignKey: 'order_id' })
   declare packages: HasMany<typeof Package>
 
-  @belongsTo(() => Address, { foreignKey: 'pickup_address_id' })
+  @belongsTo(() => Address, {
+    foreignKey: 'pickup_address_id',
+  })
   declare pickup_address: BelongsTo<typeof Address>
 
-  @belongsTo(() => Address, { foreignKey: 'delivery_address_id' })
+  @belongsTo(() => Address, {
+    foreignKey: 'delivery_address_id',
+  })
   declare delivery_address: BelongsTo<typeof Address>
 
-  @belongsTo(() => Driver)
-  declare driver: BelongsTo<typeof Driver>
 
-  @hasMany(() => OrderStatusLog)
+  @hasMany(() => OrderStatusLog, {
+    foreignKey: 'order_id',
+  })
   declare status_logs: HasMany<typeof OrderStatusLog>
 
-  @hasMany(() => OrderTransaction)
+  @hasMany(() => OrderTransaction, {
+    foreignKey: 'order_id',
+  })
   declare driver_payments: HasMany<typeof OrderTransaction>
 }
 

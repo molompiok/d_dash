@@ -2,6 +2,7 @@
 import logger from '@adonisjs/core/services/logger'
 import env from '#start/env'
 import redis from '@adonisjs/redis/services/main'
+import { NotificationPayload } from '../contracts/events.js'
 
 // Stream keys from environment variables
 const MISSION_OFFER_STREAM_KEY = env.get('REDIS_MISSION_OFFER_STREAM', 'mission_offers_stream')
@@ -241,14 +242,13 @@ class RedisHelper {
    * @param data Payload de données pour la notification
    * @returns L'ID du message ajouté au stream ou null en cas d'erreur.
    */
-  async enqueuePushNotification(
-    // target: 'client' | 'driver', // Peut être utile si le worker cherche le token
-    // targetId: string,
-    fcmToken: string | null | undefined, // Peut être null, le worker peut essayer de le trouver
-    title: string,
-    body: string,
-    data?: { [key: string]: any } // Accepte n'importe quel objet pour les data
-  ): Promise<string | null> {
+  async enqueuePushNotification({
+    fcmToken,
+    title,
+    body,
+    data,
+    // type,
+  }: NotificationPayload): Promise<string | null> {
     if (!fcmToken) {
       logger.warn({ title, body }, `Tentative d'enqueue notif sans FCM token. Skipping.`)
       // Ou: Le worker pourrait chercher le token basé sur targetId si fourni. Pour l'instant on skip.
@@ -258,7 +258,6 @@ class RedisHelper {
     try {
       // Sérialise les données si elles existent
       const dataString = data ? JSON.stringify(data) : '{}'
-
       const eventData = [
         'fcmToken',
         fcmToken,
@@ -271,7 +270,6 @@ class RedisHelper {
         'timestamp',
         String(Date.now()),
       ]
-
       const messageId = await redis.xadd(NOTIFICATION_QUEUE_STREAM, '*', ...eventData)
       logger.debug(
         `Notification enqueued to Redis Stream ${NOTIFICATION_QUEUE_STREAM}. Target Token: ${fcmToken}, Msg ID: ${messageId}`

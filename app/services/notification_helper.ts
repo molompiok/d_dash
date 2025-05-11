@@ -3,6 +3,7 @@ import logger from '@adonisjs/core/services/logger'
 import env from '#start/env'
 import admin from 'firebase-admin'
 import User from '#models/user' // Pour la fonction de nettoyage
+import { NotificationPayload } from '../contracts/events.js'
 
 let isFirebaseInitialized = false
 
@@ -61,13 +62,12 @@ class NotificationHelper {
   /**
    * Envoie une notification Push via FCM et retourne un résultat détaillé.
    */
-  public async sendPushNotification(
-    fcmToken: string,
-    title: string,
-    body: string,
-    data?: { [key: string]: any }, // Accepte n'importe quel objet
-    options: { priority?: 'high' | 'normal'; type?: string } = {}
-  ): Promise<SendNotificationResult> {
+  public async sendPushNotification({
+    fcmToken,
+    title,
+    body,
+    data,
+  }: NotificationPayload): Promise<SendNotificationResult> {
     if (!isFirebaseInitialized) {
       initializeFirebaseApp();
       logger.warn('Attempted to send notification but Firebase SDK is not initialized.')
@@ -91,8 +91,7 @@ class NotificationHelper {
       }
     }
 
-    const effectiveType = options.type || data?.type || 'default'; // Utilise type des options, puis data, puis défaut
-    const isHighPriority = options.priority === 'high' || effectiveType === 'NEW_MISSION_OFFER'; // Exemple
+    const isHighPriority = data.type === 'NEW_MISSION_OFFER' || data.type === 'MISSION_UPDATE' || data.type === 'SCHEDULE_REMINDER'; // Exemple
 
     // Récupère les IDs/sons depuis l'environnement avec fallback
     const androidChannelId = isHighPriority
@@ -109,7 +108,9 @@ class NotificationHelper {
       : env.get('FCM_DEFAULT_SOUND_IOS', 'default');
 
     const androidPriority1 = isHighPriority ? 'high' : 'normal';
+
     const androidPriority2 = isHighPriority ? 'high' : 'default';
+
     const apnsPriority = isHighPriority ? '10' : '5';
 
     // Définit la structure du message avec les options Android/iOS

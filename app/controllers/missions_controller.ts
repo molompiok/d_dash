@@ -15,14 +15,51 @@ import { DateTime } from 'luxon'
 // import { updateFiles, deleteFiles } from '#services/file_service' // Pour les preuves
 import vine from '@vinejs/vine'
 import { updateFiles } from '#services/media/UpdateFiles'
-import User from '#models/user'
 import redis_helper from '#services/redis_helper'
 import emitter from '@adonisjs/core/services/emitter'
 import Client from '#models/client'
 import driver_availability_checker from '#services/driver_availability_checker'
+import { NotificationType } from '#models/notification'
 
 @inject()
 export default class MissionController {
+
+  async show({ response, auth }: HttpContext) {
+    await auth.check()
+    const user = await auth.authenticate()
+    await user.load('driver')
+    if (!user.driver) return response.forbidden({ message: 'Livreur non trouvé.' })
+
+
+    try {
+      const order = await Order.query()
+        .where('driver_id', user.driver.id) // Le client ne voit que SES commandes
+        .preload('pickup_address')
+        .preload('delivery_address')
+        .preload('packages')
+        .preload('driver', (driverQuery) =>
+          //@ts-ignore
+          driverQuery.preload('user', (userQuery) => userQuery.select(['id', 'full_name', 'photo']))
+        ) // Charger le driver et user associé (sélection de champs)
+        .preload('status_logs', (logQuery) => logQuery.orderBy('changed_at', 'desc')) // Historique des statuts
+        .first()
+
+      if (!order) {
+        return response.notFound({ message: 'Commande non trouvée.' })
+      }
+
+      return response.ok(order.serialize({ fields: { omit: ['confirmation_code'] } })) // Omet le code ici aussi
+    } catch (error) {
+      logger.error(
+        { err: error, driverId: user.driver.id },
+        'Erreur récupération mission'
+      )
+      return response.internalServerError({
+        message: 'Erreur serveur lors de la récupération de la mission.',
+      })
+    }
+  }
+
   /**
    * [DRIVER] Accepte une mission proposée, en vérifiant l'offre active.
    * POST /missions/:orderId/accept
@@ -168,12 +205,12 @@ export default class MissionController {
         if (order.client?.fcm_token) {
           clientUser = await Client.find(order.client.id)
           if (clientUser?.fcm_token) {
-            await redis_helper.enqueuePushNotification(
-              clientUser.fcm_token,
-              'Livreur Trouvé !',
-              `Votre livreur est en route pour récupérer votre colis #${orderId.substring(0, 6)}...`,
-              { orderId: order.id, status: OrderStatus.ACCEPTED } // Data utiles
-            )
+            await redis_helper.enqueuePushNotification({
+              fcmToken: clientUser.fcm_token,
+              title: 'Livreur Trouvé !',
+              body: `Votre livreur est en route pour récupérer votre colis #${orderId.substring(0, 6)}...`,
+              data: { order_id: order.id, status: OrderStatus.ACCEPTED, type: NotificationType.MISSION_UPDATE }, // Data utiles
+            })
           }
         }
       } catch (notifError) {
@@ -307,24 +344,34 @@ export default class MissionController {
       // 4. --- Notifier le système (Worker/Batch) qu'une réassignation est nécessaire ---
       // C'est le point CRUCIAL pour relancer la recherche.
       try {
+        const token = driver.fcm_token
+        if (!token) {
+          logger.warn(`Driver ${driverId} has no FCM token. Skipping push notification.`)
+          return response.ok({ message: 'Mission refusée.' })
+        }
         const messageId = await redis_helper.publishMissionRefused(orderId, driverId)
-        await redis_helper.enqueuePushNotification(
-          driver.fcm_token,
-          'Refus de mission',
-          `Vous avez refusé la mission #${orderId.substring(0, 6)}...`,
-          { orderId: order.id, status: OrderStatus.ACCEPTED } // Data utiles
-        )
+        await redis_helper.enqueuePushNotification({
+          fcmToken: token,
+          title: 'Refus de mission',
+          body: `Vous avez refusé la mission #${orderId.substring(0, 6)}...`,
+          data: { orderId: order.id, status: OrderStatus.ACCEPTED, type: NotificationType.MISSION_UPDATE }, // Data utiles
+        })
 
         //@ts-ignore
         const ClientUser = await Client.query().where('id', order.client_id).first()
 
         if (ClientUser && ClientUser.fcm_token) {
-          await redis_helper.enqueuePushNotification(
-            ClientUser.fcm_token,
-            'Recherche en cours',
-            `Votre mission #${orderId.substring(0, 6)}... a été refusée.`,
-            { orderId: order.id, status: OrderStatus.ACCEPTED } // Data utiles
-          )
+          const token = ClientUser.fcm_token
+          if (!token) {
+            logger.warn(`Client ${ClientUser.id} has no FCM token. Skipping push notification.`)
+            return response.ok({ message: 'Mission refusée.' })
+          }
+          await redis_helper.enqueuePushNotification({
+            fcmToken: token,
+            title: 'Recherche en cours',
+            body: `Votre mission #${orderId.substring(0, 6)}... a été refusée.`,
+            data: { orderId: order.id, status: OrderStatus.ACCEPTED, type: NotificationType.MISSION_UPDATE }, // Data utiles
+          })
         }
 
         if (!messageId) {
@@ -383,7 +430,8 @@ export default class MissionController {
           longitude: vine.number(),
         }),
         reason: vine.string().optional(),
-        confirmation_code: vine.string().optional(),
+        confirmation_delivery_code: vine.string().optional(),
+        confirmation_pickup_code: vine.string().optional(),
         cancellation_reason_code: vine.enum(CancellationReasonCode).optional(),
         failure_reason_code: vine.enum(FailureReasonCode).optional(),
         // failure_details: vine.string().optional(),
@@ -462,11 +510,11 @@ export default class MissionController {
       // == Gestion SUCCESS (inclut preuve livraison et code) ==
       if (newStatus === OrderStatus.SUCCESS) {
         // A. Vérifier le code de confirmation
-        if (!order.confirmation_code || order.confirmation_code !== payload.confirmation_code) {
+        if (!order.confirmation_delivery_code || order.confirmation_delivery_code !== payload.confirmation_delivery_code) {
           await trx.rollback()
           // Il se peut que le code ne soit généré qu'au moment du pickup, récupère le vrai order
           const realOrderCode = await Order.find(orderId, { client: trx })
-          if (!realOrderCode || realOrderCode.confirmation_code !== payload.confirmation_code) {
+          if (!realOrderCode || realOrderCode.confirmation_delivery_code !== payload.confirmation_delivery_code) {
             logger.warn(`Invalid confirmation code provided for Order ${orderId}`)
             return response.badRequest({ message: 'Code de confirmation invalide.' })
           }
@@ -605,44 +653,46 @@ export default class MissionController {
       const clientUser = await Client.query().where('id', order.client_id).preload('user').first()
       let notifTitle = ''
       let notifBody = ''
-      let notifData = {}
+      let notifData = { type: NotificationType.MISSION_UPDATE, order_id: orderId, status: newStatus, reason: statusMetadata.reason || '' }
       if (clientUser?.fcm_token) {
         // clientUser doit être chargé avant/pendant la transaction
         switch (newStatus) {
           case OrderStatus.EN_ROUTE_TO_DELIVERY:
             notifTitle = 'Colis Récupéré !'
             notifBody = `...`
-            notifData = { orderId: orderId, status: newStatus }
+            notifData = { order_id: orderId, status: newStatus, type: NotificationType.MISSION_UPDATE, reason: statusMetadata.reason || '' }
             break
           case OrderStatus.AT_DELIVERY_LOCATION:
             notifTitle = 'Votre livreur est là !'
             notifBody = `...`
-            notifData = { orderId: orderId, status: newStatus }
+            notifData = { order_id: orderId, status: newStatus, type: NotificationType.MISSION_UPDATE, reason: statusMetadata.reason || '' }
             break
           case OrderStatus.SUCCESS:
             notifTitle = 'Commande Livrée !'
             notifBody = `...`
-            notifData = { orderId: orderId, status: newStatus }
+            notifData = { order_id: orderId, status: newStatus, type: NotificationType.MISSION_UPDATE, reason: statusMetadata.reason || '' }
             break
           case OrderStatus.FAILED:
             notifTitle = 'Echec de Livraison'
             notifBody = `... Raison: ${statusMetadata.reason || 'inconnue'}.`
             notifData = {
-              orderId: orderId,
+              order_id: orderId,
               status: newStatus,
               reason: statusMetadata.reason,
+              type: NotificationType.MISSION_UPDATE,
             }
             break
         }
-        if (notifTitle) {
+        if (notifTitle && clientUser.fcm_token) {
+          const token = clientUser.fcm_token
           try {
             // *** APPEL A REDIS HELPER ***
-            redis_helper.enqueuePushNotification(
-              clientUser.fcm_token,
-              notifTitle,
-              notifBody,
-              notifData
-            )
+            redis_helper.enqueuePushNotification({
+              fcmToken: token,
+              title: notifTitle,
+              body: notifBody,
+              data: notifData,
+            })
           } catch (enqueueError) {
             logger.error(
               { err: enqueueError, orderId, newStatus },
@@ -659,9 +709,9 @@ export default class MissionController {
         if (order?.client_id && order?.id) {
           // Assure que clientUser est défini
           emitter.emit('order:status_updated', {
-            orderId: orderId,
-            clientId: order.client_id,
-            newStatus: newStatus, // finalStatus est SUCCESS ou FAILED ici
+            order_id: orderId,
+            client_id: order.client_id,
+            new_status: newStatus, // finalStatus est SUCCESS ou FAILED ici
             timestamp: DateTime.now().toISO(),
             // logEntry: // Tu peux récupérer et passer le log créé si besoin
           })

@@ -202,7 +202,7 @@ export default class DriverStatusController {
       if (lastStatusRecord?.status === DriverStatus.IN_WORK) {
         // Trouver les commandes pertinentes de ce driver (requête optimisée)
         const activeOrders = await Order.query()
-          .select('id', 'client_id') // Sélectionne juste ce dont on a besoin
+          .select('id', 'client_id', 'pickup_address_id', 'delivery_address_id') // Sélectionne juste ce dont on a besoin
           .where('driver_id', driverId)
           // jointure pour vérifier le dernier statut Order directement en BDD
           .whereHas('status_logs', (logQuery) => {
@@ -214,25 +214,31 @@ export default class DriverStatusController {
               .whereIn('status', trackableStatuses) // Double check ou structure join plus complexe
           })
           .preload('client', (c) => c.select('user_id')) // Besoin user_id du client
+          .preload('delivery_address', (d) => d.select('id', 'coordinates')) // Ajout de 'id' pour être sûr, bien que coordinates suffise pour votre usage
+          .preload('pickup_address', (p) => p.select('id', 'coordinates'))   // Idem
 
         if (activeOrders.length > 0) {
           logger.trace(
             `Driver ${driverId} is IN_WORK on ${activeOrders.length} trackable order(s). Emitting location...`
           )
           for (const order of activeOrders) {
+            logger.info(`Emitting location for order ${JSON.stringify(order)}`)
+            order.delivery_address.coordinates
             const travelTime = await geo_helper.calculateTravelTime(
-              [latitude, longitude],
-              order.delivery_address.coordinates.coordinates
+              [longitude, latitude],
+              order.delivery_address.coordinates.coordinates,
+              true
             )
+            logger.info(`Travel time for order ${order.id}: ${JSON.stringify(travelTime)} seconds`)
             if (order.client?.user_id) {
               emitter.emit('order:driver_location_updated', {
-                orderId: order.id,
-                clientId: order.client_id,
-                driverId: driverId,
+                order_id: order.id,
+                client_id: order.client_id,
+                driver_id: driverId,
                 location: { latitude, longitude },
                 timestamp: DateTime.now().toISO(),
                 // TODO: Calculer ETA ici si possible et l'inclure
-                etaSeconds: travelTime?.durationSeconds ?? null,
+                eta_seconds: travelTime?.durationSeconds ?? null,
               })
             }
           }

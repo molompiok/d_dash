@@ -31,8 +31,9 @@ export default class Driver extends BaseModel {
 
 
   @column({
-    consume: GeoService.wktToPointAsGeoJSON,
-    prepare: GeoService.pointToSQL,
+    // consume: GeoService.wktToPointAsGeoJSON,
+    consume: GeoService.wktToGeoJsonPoint,
+    prepare: GeoService.pointToWkt,
   })
   declare current_location: { type: 'Point'; coordinates: number[] } | null // Type geometry (PostGIS)
 
@@ -57,10 +58,10 @@ export default class Driver extends BaseModel {
   declare latest_status: DriverStatus | null
 
   // Relations
-  @hasMany(() => DriversStatus)
+  @hasMany(() => DriversStatus, { foreignKey: 'driver_id' })
   declare statusLogs: HasMany<typeof DriversStatus>
 
-  @hasMany(() => Order)
+  @hasMany(() => Order, { foreignKey: 'driver_id' })
   declare orders: HasMany<typeof Order>
 
   @column()
@@ -72,16 +73,16 @@ export default class Driver extends BaseModel {
   @hasMany(() => DriverVehicle, { foreignKey: 'driver_id' })
   declare vehicles: HasMany<typeof DriverVehicle>
 
-  @hasMany(() => OrderTransaction)
+  @hasMany(() => OrderTransaction, { foreignKey: 'driver_id' })
   declare payments: HasMany<typeof OrderTransaction>
 
-  @hasOne(() => UserDocument , {foreignKey : 'driver_id'})
+  @hasOne(() => UserDocument, { foreignKey: 'driver_id' })
   declare user_document: HasOne<typeof UserDocument>
 
-  @hasMany(() => DriverAvailabilityRule)
+  @hasMany(() => DriverAvailabilityRule, { foreignKey: 'driver_id' })
   declare availability_rules: HasMany<typeof DriverAvailabilityRule>
 
-  @hasMany(() => DriverAvailabilityException)
+  @hasMany(() => DriverAvailabilityException, { foreignKey: 'driver_id' })
   declare availability_exceptions: HasMany<typeof DriverAvailabilityException>
 
   @beforeCreate() // Hook pour générer le CUID

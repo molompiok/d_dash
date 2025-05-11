@@ -1,7 +1,7 @@
 // ecosystem.config.cjs
 const path = require('path'); // Importez le module path
 
-const TOTAL_AVAILABILITY_WORKERS = 4; // Exemple: Lancer 4 instances
+const TOTAL_AVAILABILITY_WORKERS = 1; // Exemple: Lancer 4 instances
 
 // Déterminez le chemin correct vers votre point d'entrée Ace
 // Vérifiez si 'ace.js' existe à la racine ou si c'est 'bin/ace.js'

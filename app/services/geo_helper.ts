@@ -38,7 +38,7 @@ interface RouteDetails {
 }
 
 class GeoHelper {
-  private nominatimUrl = env.get('NOMINATIM_URL') // Ex: 'http://localhost:8080'
+  private nominatimUrl = env.get('NOMINATIM_URL') // Ex: 'http://localhost:8080'  
   private valhallaUrl = env.get('VALHALLA_URL') // Ex: 'http://localhost:8002'
   private osrmUrl = env.get('OSRM_URL') // Ex: 'http://localhost:5000'
 
@@ -128,6 +128,10 @@ class GeoHelper {
     endCoords: Point['coordinates'],
     calculateDistance: boolean = false
   ): Promise<MatrixResult | null> {
+
+    logger.info(`Calculating travel time for [${startCoords}]->[${endCoords}]`)
+    logger.info(`Valhalla URL: ${this.valhallaUrl}`)
+    logger.info(`OSRM URL: ${this.osrmUrl}`)
     // Priorité 1: Valhalla Matrix
     if (this.valhallaUrl) {
       const valhallaResult = await this.callValhallaMatrixAPI(
@@ -162,12 +166,13 @@ class GeoHelper {
     startCoords: Point['coordinates'],
     endCoords: Point['coordinates']
   ): Promise<RouteDetails | null> {
+    logger.info({ startCoords, endCoords }, 'Calling Valhalla Route API Coords.👻👻👻')
     if (!this.valhallaUrl) return null // Sécurité
     const url = `${this.valhallaUrl}/route`
     const requestBody = {
       locations: [
-        { lon: startCoords[0], lat: startCoords[1], type: 'break' },
-        { lon: endCoords[0], lat: endCoords[1], type: 'break' },
+        { lat: startCoords[0], lon: startCoords[1], type: 'break' },
+        { lat: endCoords[0], lon: endCoords[1], type: 'break' },
       ],
       costing: 'auto',
       language: 'fr-FR',
@@ -218,9 +223,10 @@ class GeoHelper {
     if (!this.valhallaUrl) return null
     const url = `${this.valhallaUrl}/sources_to_targets`
     const requestBody = {
-      sources: [{ lon: startCoords[0], lat: startCoords[1] }],
-      targets: [{ lon: endCoords[0], lat: endCoords[1] }],
+      sources: [{ lat: startCoords[0], lon: startCoords[1] }],
+      targets: [{ lat: endCoords[0], lon: endCoords[1] }],
       costing: 'auto',
+      units: 'kilometers'
     }
     logger.debug({ requestBody }, `Internal call: Valhalla Matrix API -> ${url}`)
     try {
@@ -314,13 +320,13 @@ class GeoHelper {
       if (response.status === 200 && response.data?.code === 'Ok') {
         const durationSeconds =
           response.data.durations?.[0]?.[1] !== null &&
-          response.data.durations?.[0]?.[1] !== undefined
+            response.data.durations?.[0]?.[1] !== undefined
             ? Math.round(response.data.durations[0][1])
             : null
         const distanceMeters =
           calculateDistance &&
-          response.data.distances?.[0]?.[1] !== null &&
-          response.data.distances?.[0]?.[1] !== undefined
+            response.data.distances?.[0]?.[1] !== null &&
+            response.data.distances?.[0]?.[1] !== undefined
             ? Math.round(response.data.distances[0][1])
             : null
 

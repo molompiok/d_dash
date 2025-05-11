@@ -64,7 +64,11 @@ export enum OrderTransactionStatus {
   FAILED = 'failed',
 }
 export enum OrderTransactionType {
-  CLIENT_PAYMENT = 'client_payment',
   DRIVER_PAYMENT = 'driver_payment',
-  REIMBURSEMENT = 'reimbursement',
+  DRIVER_PENALTY = 'driver_penalty',
+  DRIVER_REFUND = 'driver_refund',
+  DRIVER_WITHDRAWAL = 'driver_withdrawal',
+  DRIVER_BONUS = 'driver_bonus',
+  CLIENT_REIMBURSEMENT = 'client_reimbursement',
+  CLIENT_PAYMENT = 'client_payment'
 }

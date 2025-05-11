@@ -11,6 +11,8 @@ import { DateTime } from 'luxon'
 import { cuid } from '@adonisjs/core/helpers'
 import vine from '@vinejs/vine'
 import { updateFiles } from '#services/media/UpdateFiles'
+import redis_helper from '#services/redis_helper'
+import { NotificationType } from '#models/notification'
 
 const expirationDateRule = vine.string().transform((value: string) => {
   if (!value.match(/^\d{4}-\d{2}-\d{2}$/)) {
@@ -323,13 +325,14 @@ export default class UserDocumentController {
     try {
       const { status, rejection_reason } = await request.validateUsing(
         updateDocumentStatusValidator
-      ) // Valider AVANT
-      const userDocument = await UserDocument.find(documentId, { client: trx }) // Trouver APRES validation
+      )
+      const userDocument = await UserDocument.find(documentId, { client: trx })
 
       if (!userDocument) {
         await trx.rollback()
         return response.notFound({ message: 'Document non trouvé.' })
       }
+
 
       const oldStatus = userDocument.status
 
@@ -339,12 +342,9 @@ export default class UserDocumentController {
       userDocument.verified_at = status === DocumentStatus.APPROVED ? DateTime.now() : null
       await userDocument.save()
 
-      // Mettre à jour User.is_valid_driver
 
       const driver = await Driver.query()
         .where('id', userDocument.driver_id)
-        //@ts-ignore
-        .preload('user')
         .first()
       if (!driver) {
         throw new Error(`Utilisateur ${userDocument.driver_id} non trouvé`)
@@ -353,10 +353,24 @@ export default class UserDocumentController {
       await driver.save()
       logger.info(`Driver validity user ${driver.user_id} set to ${driver.is_valid_driver}`)
 
-      // TODO: AuditLog, Notification
+      await trx.commit()
 
-      await trx.commit() // Tout est OK, on commit
-
+      if (!driver.fcm_token) {
+        logger.warn(`No FCM token found for driver ${driver.id}`)
+      }
+      let fcmToken = driver.fcm_token
+      let title = 'Documents soumis'
+      let body = 'Vos documents ont été mis à jour.'
+      if (fcmToken) {
+        redis_helper.enqueuePushNotification({
+          fcmToken,
+          title,
+          body,
+          data: { document_id: documentId, type: NotificationType.DOCUMENT_STATUS_UPDATE },
+        })
+      } else {
+        logger.warn(`No FCM token found for driver ${driver.id}`)
+      }
       logger.info(
         `Statut UserDocument ${documentId} (${oldStatus} -> ${status}) updated by admin ${adminUser.id}`
       )
@@ -365,31 +379,26 @@ export default class UserDocumentController {
         document: userDocument.serialize(),
       })
     } catch (error) {
-      await trx.rollback() // Annuler TOUTES les opérations DB si erreur
-      // --- Gestion Erreur admin_update_status ---
+      await trx.rollback()
       logger.error(
         { err: error, documentId, adminId: adminUser.id },
         'Erreur MàJ statut document par admin'
       )
 
       if (error.code === 'E_VALIDATION_ERROR') {
-        // Erreur du validateur (status invalide, raison manquante si rejet)
         return response.badRequest({
           message: 'Données de mise à jour invalides.',
           errors: error.messages,
         })
       }
       if (error.message.includes('Utilisateur') && error.message.includes('non trouvé')) {
-        // Cas où l'utilisateur lié au document n'existe plus (rare mais possible)
         return response.internalServerError({
           message: "Erreur critique: l'utilisateur associé à ce document est introuvable.",
         })
       }
-      // Autres erreurs (BDD, etc.)
       return response.internalServerError({
         message: 'Erreur serveur lors de la mise à jour du statut du document.',
       })
-      // --- Fin Gestion Erreur ---
     }
   }
 }

@@ -21,6 +21,7 @@ type EventData = {
 
 // --- Helpers ---
 import redis_helper from '#services/redis_helper'
+import { NotificationType } from '#models/notification'
 
 // --- Config ---
 const ASSIGNMENT_STREAM_KEY = process.env.REDIS_ASSIGNMENT_STREAM || 'assignment_logic_stream'
@@ -323,15 +324,17 @@ export default class AssignmentWorker extends BaseCommand {
           const notifTitle = 'Nouvelle Mission'
           const notifBody = `Course #${orderId.substring(0, 6)} (tentative ${attemptCount})... Rém: ${order.remuneration} EUR. Exp: ${expiresAt.toFormat('HH:mm:ss')}`
           const notifData = {
-            type: 'NEW_MISSION_OFFER',
-            orderId,
-            offerExpiresAt: expiresAt.toISO(),
+            order_id: orderId,
+            offer_expires_at: expiresAt.toISO(),
+            type: NotificationType.NEW_MISSION_OFFER,
           }
           const pushSent = await redis_helper.enqueuePushNotification(
-            selectedDriver.fcm_token,
-            notifTitle,
-            notifBody,
-            notifData
+            {
+              fcmToken: selectedDriver.fcm_token,
+              title: notifTitle,
+              body: notifBody,
+              data: notifData,
+            }
           )
 
           if (!pushSent) {
