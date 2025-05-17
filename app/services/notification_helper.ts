@@ -69,7 +69,7 @@ class NotificationHelper {
     data,
   }: NotificationPayload): Promise<SendNotificationResult> {
     if (!isFirebaseInitialized) {
-      initializeFirebaseApp();
+      await initializeFirebaseApp();
       logger.warn('Attempted to send notification but Firebase SDK is not initialized.')
       return {
         success: false,

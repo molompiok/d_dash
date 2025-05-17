@@ -1,368 +1,410 @@
-// app/services/geo_helper.ts
+// app/services/geo_helper.ts (ou ValhallaService.ts)
 import env from '#start/env'
 import logger from '@adonisjs/core/services/logger'
-import { Point } from 'geojson'
-// Optionnel mais recommandé pour les requêtes HTTP
-// npm install axios
 import axios, { AxiosError } from 'axios'
-// Nécessite un package pour décoder les polylines de Valhalla/OSRM
-// npm install @mapbox/polyline
-import polyline from '@mapbox/polyline'
-import { CalculationEngine } from '#models/order'
+import polyline from '@mapbox/polyline' // Pour décoder les polylines
+import { CalculationEngine, waypointStatus, type WaypointSummaryItem } from '#models/order' // Importer CalculationEngine
+import type { LegManeuver } from '#models/order_route_leg' // Importer l'interface
+import { GeoJsonLineString } from './geo_service.js'
 
-// --- Interfaces pour les retours (simplifiées) ---
-interface GeocodeResult {
-  coordinates: Point['coordinates'] // [longitude, latitude]
-  city?: string
-  postcode?: string
-  country_code?: string
-  // rawDetails?: any; // Pourrait contenir la réponse brute de Nominatim
+const GEOCODING_TIMEOUT = 30000  // ms
+const ROUTING_TIMEOUT = 20000 // ms, augmenté car peut être plus long pour multi-points
+const MATRIX_TIMEOUT = 7000   // ms
+
+// Interface pour un waypoint d'entrée pour Valhalla
+interface ValhallaLocation {
+  lat: number
+  lon: number
+  type: 'break' | 'through' // 'break' pour un arrêt, 'through' pour un point de passage sans arrêt
+  heading?: number
+  // ... autres options Valhalla si besoin (side_of_street, etc.)
 }
 
-interface MatrixResult {
-  durationSeconds: number | null
-  distanceMeters: number | null
-  engine: CalculationEngine
+// Structure de la réponse attendue de Valhalla pour les legs (simplifiée)
+interface ValhallaLeg {
+  summary: {
+    time: number // secondes
+    length: number // kilomètres
+    end_point: {
+      lat: number
+      lon: number
+    }
+    start_point: {
+      lat: number
+      lon: number
+    }
+    // ... autres champs du résumé du leg
+  }
+  maneuvers: LegManeuver[] // Utilise ton interface LegManeuver
+  shape: string // Polyline encodée (Google Polyline Algorithm)
 }
 
-const GEOCODING_TIMEOUT = 15000
-const ROUTING_TIMEOUT = 10000
-const MATRIX_TIMEOUT = 7000
-
-interface RouteDetails {
-  distanceMeters: number
-  durationSeconds: number
-  geometry: { type: 'LineString'; coordinates: number[][] } // GeoJSON LineString
-  engine: CalculationEngine
-  // rawDetails?: any; // Réponse brute du moteur de routage
+interface ValhallaTrip {
+  locations: ValhallaLocation[]
+  legs: ValhallaLeg[]
+  summary: {
+    time: number // secondes
+    length: number // kilomètres
+    end_point: {
+      lat: number
+      lon: number
+    }
+    start_point: {
+      lat: number
+      lon: number
+    }
+    // ...
+  }
+  status: number // Code de statut Valhalla
+  status_message: string
+  units: string // 'kilometers' ou 'miles'
 }
+
+// Structure pour le retour du calcul d'itinéraire optimisé
+export interface OptimizedRouteDetails {
+  global_summary: {
+    total_duration_seconds: number
+    total_distance_meters: number
+  }
+  legs: Array<{
+    geometry: { type: 'LineString'; coordinates: number[][] } // GeoJSON LineString [lon, lat][]
+    duration_seconds: number
+    distance_meters: number
+    maneuvers: LegManeuver[]
+    raw_valhalla_leg_data?: ValhallaLeg // Optionnel: pour stocker le leg brut
+    // Tu pourrais aussi ajouter les coordonnées de début/fin du leg ici si Valhalla ne les donne pas explicitement par leg
+  }>
+  calculation_engine: CalculationEngine
+  waypoints_summary_for_order?: WaypointSummaryItem[] // Pour aider à construire Order.waypoints_summary
+}
+
 
 class GeoHelper {
-  private nominatimUrl = env.get('NOMINATIM_URL') // Ex: 'http://localhost:8080'  
-  private valhallaUrl = env.get('VALHALLA_URL') // Ex: 'http://localhost:8002'
-  private osrmUrl = env.get('OSRM_URL') // Ex: 'http://localhost:5000'
+  private nominatimUrl = env.get('NOMINATIM_URL')
+  private valhallaUrl = env.get('VALHALLA_URL')
+  // private osrmUrl = env.get('OSRM_URL') // Si tu gardes OSRM en fallback
 
-  /**
-   * Géocode une adresse textuelle en coordonnées via Nominatim.
-   */
-  async geocodeAddress(addressString: string): Promise<GeocodeResult | null> {
+  constructor() {
+    if (!this.valhallaUrl) {
+      logger.warn('VALHALLA_URL non configuré dans .env. Les calculs d\'itinéraire Valhalla échoueront.')
+    }
+    // Idem pour Nominatim et OSRM si utilisés
+  }
+
+  // --- Géocodage (inchangé par rapport à ta version, mais le garder ici) ---
+  async geocodeAddress(addressString: string): Promise<{
+    coordinates: [number, number]; // lon, lat
+    city?: string;
+    postcode?: string;
+    country_code?: string;
+    // rawDetails?: any;
+  } | null> {
     if (!this.nominatimUrl) {
-      logger.error('NOMINATIM_URL non défini dans .env')
+      logger.error('NOMINATIM_URL non défini dans .env pour geocodeAddress')
       return null
     }
-
     const url = `${this.nominatimUrl}/search?format=json&q=${encodeURIComponent(addressString)}&limit=1&addressdetails=1`
-    logger.error(`Geocoding request to: ${url}`)
-
     try {
-      const response = await axios.get(url, { timeout: GEOCODING_TIMEOUT }) // Timeout 5s
-
+      const response = await axios.get(url, { timeout: GEOCODING_TIMEOUT })
       if (response.status === 200 && response.data && response.data.length > 0) {
         const result = response.data[0]
-        logger.debug({ nominatimResult: result }, 'Geocoding success')
-
-        // --- ATTENTION: La structure de réponse de Nominatim peut varier ---
-        // Vérifie la structure de TA réponse Nominatim
         if (result.lon && result.lat) {
           return {
-            // Format GeoJSON : [longitude, latitude]
-            coordinates: [
-              Number(Number.parseFloat(result.lon)),
-              Number(Number.parseFloat(result.lat)),
-            ],
+            coordinates: [parseFloat(result.lon), parseFloat(result.lat)],
             city: result.address?.city || result.address?.town || result.address?.village,
             postcode: result.address?.postcode,
-            country_code: result.address?.country_code,
-            // rawDetails: result
+            country_code: result.address?.country_code?.toUpperCase(),
+            // rawDetails: result,
           }
-        } else {
-          logger.warn({ addressString, result }, 'Nominatim result found but no coordinates')
-          return null
         }
-      } else {
-        logger.warn(
-          { status: response.status, data: response.data },
-          `Geocoding failed for address: ${addressString}`
-        )
-        return null
       }
+      logger.warn({ addressString, responseData: response.data }, 'Geocoding failed or no results')
+      return null
     } catch (error) {
-      logger.error({ err: error, addressString }, 'Error during geocoding request')
+      this.logApiError('Nominatim Geocoding', url, error)
       return null
     }
   }
 
   /**
-   * Calcule l'itinéraire complet (public).
-   * Tente Valhalla puis OSRM comme fallback.
-   */
-  async calculateRouteDetails(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates']
-  ): Promise<RouteDetails | null> {
-    // Priorité 1: Valhalla
-    if (this.valhallaUrl) {
-      const valhallaResult = await this.callValhallaRouteAPI(startCoords, endCoords)
-      if (valhallaResult) return valhallaResult // Succès Valhalla
-      logger.warn(
-        `Valhalla route failed for [${startCoords}]->[${endCoords}], attempting OSRM fallback.`
-      )
+     * Calcule le temps de trajet et optionnellement la distance
+     * d'un point de départ à un point d'arrivée, via Valhalla /route.
+     * Utile pour un ETA "direct" sans considérer les arrêts intermédiaires d'une tournée.
+     */
+  async getDirectRouteInfo(
+    startCoordinates: [number, number], // lon, lat
+    endCoordinates: [number, number],   // lon, lat
+    costingModel: string = 'auto'
+  ): Promise<{ durationSeconds: number; distanceMeters: number; geometry?: GeoJsonLineString } | null> {
+    if (!this.valhallaUrl) {
+      logger.error('Valhalla URL non défini pour getDirectRouteInfo.');
+      return null;
     }
-    // Priorité 2: OSRM (Fallback)
-    if (this.osrmUrl) {
-      const osrmResult = await this.callOsrmRouteAPI(startCoords, endCoords)
-      if (osrmResult) return osrmResult // Succès OSRM
-      logger.warn(`OSRM route fallback also failed for [${startCoords}]->[${endCoords}].`)
-    }
-    // Échec des deux
-    logger.error(`Failed to calculate route details using both Valhalla and OSRM.`)
-    return null
-  }
 
-  /**
-   * Calcule la durée et/ou distance (public).
-   * Tente Valhalla Matrix puis OSRM Table comme fallback.
-   */
-  async calculateTravelTime(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates'],
-    calculateDistance: boolean = false
-  ): Promise<MatrixResult | null> {
-
-    logger.info(`Calculating travel time for [${startCoords}]->[${endCoords}]`)
-    logger.info(`Valhalla URL: ${this.valhallaUrl}`)
-    logger.info(`OSRM URL: ${this.osrmUrl}`)
-    // Priorité 1: Valhalla Matrix
-    if (this.valhallaUrl) {
-      const valhallaResult = await this.callValhallaMatrixAPI(
-        startCoords,
-        endCoords,
-        calculateDistance
-      )
-      if (valhallaResult) return valhallaResult // Succès Valhalla
-      logger.warn(
-        `Valhalla matrix failed for [${startCoords}]->[${endCoords}], attempting OSRM fallback.`
-      )
-    }
-    // Priorité 2: OSRM Table (Fallback)
-    if (this.osrmUrl) {
-      const osrmResult = await this.callOsrmTableAPI(startCoords, endCoords, calculateDistance)
-      if (osrmResult) return osrmResult // Succès OSRM
-      logger.warn(`OSRM table fallback also failed for [${startCoords}]->[${endCoords}].`)
-    }
-    // Échec des deux
-    logger.error(`Failed to calculate travel time/distance using both Valhalla and OSRM.`)
-    return null
-  }
-
-  // ================================================
-  // Méthodes INTERNES pour les Appels API Moteurs
-  // ================================================
-
-  /**
-   * [INTERNE] Appelle l'API Valhalla '/route' et parse la réponse.
-   */
-  private async callValhallaRouteAPI(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates']
-  ): Promise<RouteDetails | null> {
-    logger.info({ startCoords, endCoords }, 'Calling Valhalla Route API Coords.👻👻👻')
-    if (!this.valhallaUrl) return null // Sécurité
-    const url = `${this.valhallaUrl}/route`
     const requestBody = {
       locations: [
-        { lat: startCoords[0], lon: startCoords[1], type: 'break' },
-        { lat: endCoords[0], lon: endCoords[1], type: 'break' },
+        { lon: startCoordinates[0], lat: startCoordinates[1], type: 'break' as const },
+        { lon: endCoordinates[0], lat: endCoordinates[1], type: 'break' as const },
       ],
-      costing: 'auto',
-      language: 'fr-FR',
-      directions_options: { units: 'meters' },
-    }
-    logger.debug({ requestBody }, `Internal call: Valhalla Route API -> ${url}`)
+      costing: costingModel,
+      language: 'fr-FR', // Ou ta langue par défaut
+      directions_options: { units: 'kilometers' },
+    };
+
+    const url = `${this.valhallaUrl}/route`;
+    // logger.info({ start: startCoordinates, end: endCoordinates }, 'Calcul d\'itinéraire direct Valhalla (getDirectRouteInfo)');
+
     try {
-      const response = await axios.post(url, requestBody, { timeout: ROUTING_TIMEOUT })
-      if (
-        response.status === 200 &&
-        response.data?.trip?.summary &&
-        response.data.trip.legs?.[0]?.shape
-      ) {
-        const trip = response.data.trip
-        const distanceMeters = Math.round(trip.summary.length * 1000)
-        const durationSeconds = Math.round(trip.summary.time)
-        const geometryCoords = polyline
-          .decode(trip.legs[0].shape)
-          .map((p: number[]) => [p[1], p[0]])
+      const response = await axios.post<{ trip: ValhallaTrip }>(url, requestBody, { timeout: ROUTING_TIMEOUT });
+
+      if (response.status === 200 && response.data?.trip?.summary && response.data.trip.legs?.length > 0) {
+        const tripSummary = response.data.trip.summary;
+        const firstLeg = response.data.trip.legs[0]; // Pour un A->B, il n'y a qu'un leg
+
+        const decodedShape = polyline.decode(firstLeg.shape, 6) as [number, number][];
+        const geoJsonCoords = decodedShape.map(p => [p[1], p[0]]);
 
         return {
-          distanceMeters,
-          durationSeconds,
-          geometry: { type: 'LineString', coordinates: geometryCoords },
-          engine: CalculationEngine.VALHALLA,
-        }
+          durationSeconds: Math.round(tripSummary.time),
+          distanceMeters: Math.round(tripSummary.length * 1000),
+          //@ts-ignore
+          geometry: { type: 'LineString' as const, coordinates: geoJsonCoords } // Optionnel, mais peut être utile
+        };
       } else {
-        logger.warn(
-          { status: response.status, data: response.data },
-          `Valhalla Route API returned unexpected data.`
-        )
-        return null
+        logger.warn({ status: response.status, data: response.data }, `Valhalla Direct Route Info API returned unexpected data.`);
+        return null;
       }
     } catch (error) {
-      this.logApiError('Valhalla Route', url, error)
-      return null
+      this.logApiError('Valhalla Direct Route Info', url, error);
+      return null;
     }
   }
-
   /**
-   * [INTERNE] Appelle l'API Valhalla '/sources_to_targets' et parse la réponse.
+   * Calcule un itinéraire optimisé multi-points via Valhalla.
+   * Prend une liste de waypoints (points de passage).
+   * Le premier waypoint DOIT être la position actuelle du livreur.
    */
-  private async callValhallaMatrixAPI(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates'],
-    calculateDistance: boolean
-  ): Promise<MatrixResult | null> {
-    if (!this.valhallaUrl) return null
-    const url = `${this.valhallaUrl}/sources_to_targets`
+  async calculateOptimizedRoute(
+    waypoints: Array<{
+      coordinates: [number, number] // lon, lat
+      type: 'break' | 'through' // 'break' pour un arrêt réel (pickup/delivery)
+      // Optionnel : infos pour construire le waypoints_summary de l'Order
+      address_id?: string
+      address_text?: string
+      waypoint_type_for_summary?: 'pickup' | 'delivery' // Pour distinguer de Valhalla 'type'
+      package_name_for_summary?: string
+      confirmation_code?: string
+    }>
+  ): Promise<OptimizedRouteDetails | null> {
+    if (!this.valhallaUrl || waypoints.length < 2) {
+      logger.error('Valhalla URL non défini ou nombre de waypoints insuffisant (<2).')
+      return null
+    }
+
+    const valhallaLocations: ValhallaLocation[] = waypoints.map(wp => ({
+      lon: wp.coordinates[0],
+      lat: wp.coordinates[1],
+      type: wp.type,
+    }));
+
     const requestBody = {
-      sources: [{ lat: startCoords[0], lon: startCoords[1] }],
-      targets: [{ lat: endCoords[0], lon: endCoords[1] }],
-      costing: 'auto',
-      units: 'kilometers'
-    }
-    logger.debug({ requestBody }, `Internal call: Valhalla Matrix API -> ${url}`)
-    try {
-      const response = await axios.post(url, requestBody, { timeout: MATRIX_TIMEOUT })
-      if (response.status === 200 && response.data?.sources_to_targets?.[0]?.[0]) {
-        const result = response.data.sources_to_targets[0][0]
-        const durationSeconds = result.time !== null ? Math.round(result.time) : null
-        const distanceMeters =
-          calculateDistance && result.distance !== null ? Math.round(result.distance * 1000) : null
-
-        if (durationSeconds !== null || (calculateDistance && distanceMeters !== null)) {
-          return { durationSeconds, distanceMeters, engine: CalculationEngine.VALHALLA }
-        } else {
-          logger.warn({ result }, `Valhalla Matrix result has null time/distance.`)
-          return null // Non routable selon Valhalla
+      locations: valhallaLocations,
+      costing: 'auto', // ou 'truck', 'bicycle', 'pedestrian' selon le véhicule/contexte
+      costing_options: { // Exemple pour 'auto'
+        auto: {
+          top_speed: 30, // km/h
+          // Uturn_penalty: 1000, // Default is 20s,
         }
-      } else {
-        logger.warn(
-          { status: response.status, data: response.data },
-          `Valhalla Matrix API returned unexpected data.`
-        )
-        return null
-      }
-    } catch (error) {
-      this.logApiError('Valhalla Matrix', url, error)
-      return null
+      },
+      language: 'fr-FR', // Ou autre langue supportée
+      directions_options: { units: 'kilometers' }, // Valhalla retournera length en km
+      // Pour un itinéraire optimisé (TSP - Traveling Salesperson Problem)
+      // Valhalla ne fait pas de TSP out-of-the-box via /route.
+      // L'optimisation de l'ordre des waypoints doit être faite AVANT d'appeler /route,
+      // ou en utilisant l'endpoint /optimized_route si votre instance Valhalla le supporte
+      // et que vous l'avez configuré pour.
+      // Pour /route, l'ordre des `locations` est l'ordre du trajet.
     }
-  }
 
-  /**
-   * [INTERNE] Appelle l'API OSRM '/route/v1' et parse la réponse.
-   */
-  private async callOsrmRouteAPI(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates']
-  ): Promise<RouteDetails | null> {
-    if (!this.osrmUrl) return null
-    const profile = 'driving'
-    const coordinatesString = `${startCoords[0]},${startCoords[1]};${endCoords[0]},${endCoords[1]}`
-    // overview=full pour géométrie complète, steps=false pour moins de data
-    const url = `${this.osrmUrl}/route/v1/${profile}/${coordinatesString}?overview=full&geometries=polyline&steps=false`
-    logger.debug(`Internal call: OSRM Route API -> ${url}`)
+    const url = `${this.valhallaUrl}/route`; // Ou /optimized_route
+    logger.info({ requestBody, url }, 'Calcul de l\'itinéraire optimisé Valhalla')
+
     try {
-      const response = await axios.get(url, { timeout: ROUTING_TIMEOUT })
-      if (
-        response.status === 200 &&
-        response.data?.code === 'Ok' &&
-        response.data.routes?.length > 0
-      ) {
-        const route = response.data.routes[0]
-        const distanceMeters = Math.round(route.distance)
-        const durationSeconds = Math.round(route.duration)
-        // OSRM polyline est [lat,lon], besoin de convertir
-        const geometryCoords = polyline.decode(route.geometry).map((p: number[]) => [p[1], p[0]])
+      const response = await axios.post<{ trip: ValhallaTrip }>(url, requestBody, { timeout: ROUTING_TIMEOUT })
+
+      if (response.status === 200 && response.data && response.data.trip) {
+        const trip = response.data.trip
+        logger.debug({ trip }, 'Réponse Valhalla Trip')
+
+        if (!trip.legs || trip.legs.length === 0) {
+          logger.warn({ trip }, 'Valhalla a retourné un trip sans legs.')
+          return null
+        }
+
+        const parsedLegs = trip.legs.map((leg: ValhallaLeg, index: number) => {
+          const decodedShape = polyline.decode(leg.shape, 6) as [number, number][];
+          const geoJsonCoords = decodedShape.map((p: [number, number]) => {
+            // Ajouter une vérification si les coordonnées sont dans une plage raisonnable
+            if (isNaN(p[0]) || isNaN(p[1]) || p[0] < -90 || p[0] > 90 || p[1] < -180 || p[1] > 180) {
+              logger.warn({ lat: p[0], lon: p[1], legIndex: index }, "Coordonnée décodée invalide ou hors limites");
+              // Retourner null ou une valeur par défaut, ou lever une erreur ?
+              // Pour GeoJSON, il faut des coordonnées valides. On pourrait filtrer ce point.
+              return null; // Ou [0, 0] ?
+            }
+            return [p[1], p[0]]; // lon, lat
+          }).filter(coord => coord !== null) as [number, number][];
+
+          const startWaypointOfLeg = waypoints[index]; // Le waypoint d'où part ce leg
+          const endWaypointOfLeg = waypoints[index + 1]; // Le waypoint où ce leg arrive
+
+          if (!startWaypointOfLeg || !endWaypointOfLeg) {
+            logger.error(`Incohérence dans les waypoints pour le leg ${index}. Impossible de déterminer start/end.`);
+            // Tu pourrais lever une erreur ici ou retourner un leg invalide
+            // Pour l'instant, on va essayer de prendre de la shape si les waypoints manquent, bien que ce soit un fallback
+            return {
+              geometry: { type: 'LineString' as const, coordinates: geoJsonCoords },
+              duration_seconds: Math.round(leg.summary.time),
+              distance_meters: Math.round(leg.summary.length * 1000),
+              maneuvers: leg.maneuvers,
+              raw_valhalla_leg_data: leg,
+              // Coordonnées de la shape comme fallback
+              start_leg_coordinates_fallback: geoJsonCoords.length > 0 ? geoJsonCoords[0] : undefined,
+              end_leg_coordinates_fallback: geoJsonCoords.length > 0 ? geoJsonCoords[geoJsonCoords.length - 1] : undefined,
+            };
+          }
+
+          return {
+            geometry: { type: 'LineString' as const, coordinates: geoJsonCoords },
+            duration_seconds: Math.round(leg.summary.time),
+            distance_meters: Math.round(leg.summary.length * 1000),
+            maneuvers: leg.maneuvers,
+            raw_valhalla_leg_data: leg,
+            _internal_start_coords_for_leg: startWaypointOfLeg.coordinates,
+            _internal_end_coords_for_leg: endWaypointOfLeg.coordinates,
+          };
+        });
+
+
+        const waypointsSummaryForOrder: WaypointSummaryItem[] = [];
+
+        function generateSecureCode(): string {
+          const array = new Uint32Array(1);
+          crypto.getRandomValues(array); // crypto sécurisé
+          const code = array[0] % 1000000; // limite à 6 chiffres
+          return code.toString().padStart(6, '0'); // toujours 6 chiffres (ex: 004381)
+        }
+        for (let i = 0; i < trip.legs.length; i++) {
+          const destinationWaypointInfo = waypoints[i + 1];
+
+          if (destinationWaypointInfo && destinationWaypointInfo.waypoint_type_for_summary) {
+            waypointsSummaryForOrder.push({
+              type: destinationWaypointInfo.waypoint_type_for_summary,
+              address_id: destinationWaypointInfo.address_id || `generated_wp_id_${i + 1}`,
+              address_text: destinationWaypointInfo.address_text,
+              coordinates: destinationWaypointInfo.coordinates,
+              sequence: i,
+              status: waypointStatus.PENDING,
+              confirmation_code: generateSecureCode(),
+              is_mandatory: true,
+              notes: '',
+              start_at: null,
+              end_at: null,
+              photo_urls: [],
+              name: destinationWaypointInfo.package_name_for_summary,
+            });
+          }
+        }
 
         return {
-          distanceMeters,
-          durationSeconds,
-          geometry: { type: 'LineString', coordinates: geometryCoords },
-          engine: CalculationEngine.OSRM,
-        }
+          global_summary: {
+            total_duration_seconds: Math.round(trip.summary.time),
+            total_distance_meters: Math.round(trip.summary.length * 1000),
+          },
+          legs: parsedLegs.map(pLeg => ({ // Enlever les champs internes _internal_...
+            geometry: pLeg.geometry,
+            duration_seconds: pLeg.duration_seconds,
+            distance_meters: pLeg.distance_meters,
+            maneuvers: pLeg.maneuvers,
+            raw_valhalla_leg_data: pLeg.raw_valhalla_leg_data,
+          })),
+          calculation_engine: CalculationEngine.VALHALLA,
+          waypoints_summary_for_order: waypointsSummaryForOrder,
+        };
       } else {
-        logger.warn(
-          { status: response.status, data: response.data },
-          `OSRM Route API returned unexpected data.`
-        )
+        logger.warn({ status: response.status, data: response.data }, `Valhalla Route API (optimized) returned unexpected data.`)
         return null
       }
     } catch (error) {
-      this.logApiError('OSRM Route', url, error)
+      this.logApiError('Valhalla Optimized Route', url, error)
       return null
     }
   }
 
   /**
-   * [INTERNE] Appelle l'API OSRM '/table/v1' et parse la réponse.
+   * Calcule un itinéraire simple (A vers B) pour le reroutage d'un leg.
    */
-  private async callOsrmTableAPI(
-    startCoords: Point['coordinates'],
-    endCoords: Point['coordinates'],
-    calculateDistance: boolean
-  ): Promise<MatrixResult | null> {
-    if (!this.osrmUrl) return null
-    const profile = 'driving'
-    const coordinatesString = `${startCoords[0]},${startCoords[1]};${endCoords[0]},${endCoords[1]}`
-    const annotations = calculateDistance ? 'duration,distance' : 'duration'
-    const url = `${this.osrmUrl}/table/v1/${profile}/${coordinatesString}?sources=0&destinations=1&annotations=${annotations}`
-    logger.debug(`Internal call: OSRM Table API -> ${url}`)
+  async rerouteLeg(
+    startCoordinates: [number, number], // lon, lat
+    endCoordinates: [number, number],   // lon, lat
+    costingModel: string = 'auto' // 'auto', 'truck', 'bicycle', etc.
+  ): Promise<Omit<OptimizedRouteDetails['legs'][0], 'raw_valhalla_leg_data'> | null> {
+    // Cette fonction est une version simplifiée de calculateOptimizedRoute pour un seul leg.
+    // logger.info({ startCoordinates, endCoordinates }, 'Calcul de reroutage de leg Valhalla (rerouteLeg)');
+    if (!this.valhallaUrl) return null
+
+    const requestBody = {
+      locations: [
+        { lat: startCoordinates[1], lon: startCoordinates[0], type: 'break' as const },
+        { lat: endCoordinates[1], lon: endCoordinates[0], type: 'break' as const },
+      ],
+      costing: costingModel,
+      language: 'fr-FR',
+      directions_options: { units: 'kilometers' },
+    }
+
+    const url = `${this.valhallaUrl}/route`;
+    // logger.info({ requestBody, url }, 'Calcul de reroutage de leg Valhalla')
+
     try {
-      const response = await axios.get(url, { timeout: MATRIX_TIMEOUT })
-      if (response.status === 200 && response.data?.code === 'Ok') {
-        const durationSeconds =
-          response.data.durations?.[0]?.[1] !== null &&
-            response.data.durations?.[0]?.[1] !== undefined
-            ? Math.round(response.data.durations[0][1])
-            : null
-        const distanceMeters =
-          calculateDistance &&
-            response.data.distances?.[0]?.[1] !== null &&
-            response.data.distances?.[0]?.[1] !== undefined
-            ? Math.round(response.data.distances[0][1])
-            : null
+      const response = await axios.post<{ trip: ValhallaTrip }>(url, requestBody, { timeout: ROUTING_TIMEOUT })
 
-        if (durationSeconds !== null || (calculateDistance && distanceMeters !== null)) {
-          return { durationSeconds, distanceMeters, engine: CalculationEngine.OSRM }
-        } else {
-          logger.warn({ result: response.data }, `OSRM Table result has null time/distance.`)
-          return null // Non routable selon OSRM
+      if (response.status === 200 && response.data?.trip?.legs?.length > 0) {
+        const leg = response.data.trip.legs[0]
+        const decodedShape = polyline.decode(leg.shape, 6) as [number, number][]
+        const geoJsonCoords = decodedShape.map(p => [p[1], p[0]])
+        // logger.info({ geoJsonCoords }, 'geoJsonCoords rerouted')
+        return {
+          geometry: { type: 'LineString' as const, coordinates: geoJsonCoords },
+          duration_seconds: Math.round(leg.summary.time),
+          distance_meters: Math.round(leg.summary.length * 1000),
+          maneuvers: leg.maneuvers,
         }
       } else {
-        logger.warn(
-          { status: response.status, data: response.data },
-          `OSRM Table API returned unexpected data.`
-        )
+        logger.warn({ status: response.status, data: response.data }, `Valhalla Reroute Leg API returned unexpected data.`)
         return null
       }
     } catch (error) {
-      this.logApiError('OSRM Table', url, error)
+      this.logApiError('Valhalla Reroute Leg', url, error)
       return null
     }
   }
 
-  /**
-   * [INTERNE] Helper pour logger les erreurs Axios de manière standardisée.
-   */
+
+  // Helper pour logger les erreurs Axios de manière standardisée
   private logApiError(apiName: string, url: string, error: any) {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError
       logger.error(
         {
+          message: axiosError.message,
           status: axiosError.response?.status,
           responseData: axiosError.response?.data,
           url,
           api: apiName,
+          code: axiosError.code,
+          config: axiosError.config,
         },
-        `Error during ${apiName} request`
+        `Axios error during ${apiName} request`
       )
     } else {
       logger.error({ err: error, url, api: apiName }, `Non-Axios error during ${apiName} request`)
@@ -370,6 +412,4 @@ class GeoHelper {
   }
 }
 
-// Exporte une instance ou la classe directement
 export default new GeoHelper()
-// ou: export default GeoHelper

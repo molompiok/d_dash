@@ -1,4 +1,4 @@
-import { OrderTransactionStatus, OrderTransactionType } from '#models/order_transaction'
+import { OrderTransactionStatus, OrderTransactionType, PaymentMethod } from '#models/order_transaction'
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
 export default class extends BaseSchema {
@@ -22,6 +22,8 @@ export default class extends BaseSchema {
         .onDelete('SET NULL')
         .nullable()
       table.string('currency').defaultTo('CFA')
+      table.enum('payment_method', Object.values(PaymentMethod))
+      table.jsonb('metadata').defaultTo('{}')
       table
         .string('client_id')
         .unsigned()
@@ -38,7 +40,7 @@ export default class extends BaseSchema {
       table
         .enum('status', Object.values(OrderTransactionStatus))
         .defaultTo(OrderTransactionStatus.PENDING)
-      table.jsonb('history_status').defaultTo('[]')
+      table.jsonb('history_status').defaultTo('{}')
 
       table.timestamp('payment_date').notNullable()
       table.timestamps(true, true)

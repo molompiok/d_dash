@@ -2,47 +2,136 @@
 import logger from '@adonisjs/core/services/logger'
 import env from '#start/env'
 import redis from '@adonisjs/redis/services/main'
-import { NotificationPayload } from '../contracts/events.js'
+import { NotificationPayload } from '../contracts/events.js' // Supposons que cela existe et est correct
 
-// Stream keys from environment variables
+// --- Stream Keys ---
+// Stream pour les offres initiales aux chauffeurs (consommé par un système qui envoie la notif/affiche l'offre)
 const MISSION_OFFER_STREAM_KEY = env.get('REDIS_MISSION_OFFER_STREAM', 'mission_offers_stream')
-const ASSIGNMENT_LOGIC_STREAM_KEY = env.get('REDIS_ASSIGNMENT_STREAM', 'assignment_logic_stream')
 
-const ASSIGNMENT_LOGIC_STREAM = env.get('REDIS_ASSIGNMENT_STREAM', 'assignment_logic_stream')
-const NOTIFICATION_QUEUE_STREAM = env.get('REDIS_NOTIFICATION_STREAM', 'notifications_queue_stream')
+// Stream pour les événements qui impactent la logique d'assignation (consommé par AssignmentWorker)
+const ASSIGNMENT_EVENTS_STREAM_KEY = env.get(
+  'REDIS_ASSIGNMENT_LOGIC_STREAM', // Renommé pour plus de clarté
+  'assignment_events_stream'
+)
 
-// Enum for event types to ensure consistency
-enum RedisEventType {
-  MISSION_OFFER = 'mission_offer',
-  MISSION_ACCEPTED = 'mission_accepted',
-  MISSION_REFUSED = 'mission_refused',
-  MISSION_COMPLETED = 'mission_completed',
-  MISSION_CANCELLED = 'mission_cancelled',
-  MISSION_FAILED = 'mission_failed',
+// Stream pour les notifications génériques (consommé par NotificationWorker)
+const NOTIFICATION_QUEUE_STREAM = env.get(
+  'REDIS_NOTIFICATION_QUEUE_STREAM', // Nom plus explicite
+  'notification_queue_stream'
+)
+
+// --- Event Types ---
+// Enum pour les types d'événements Redis pour plus de cohérence et de maintenabilité
+export enum MissionLifecycleEvent {
+  // Événements pour MISSION_OFFER_STREAM_KEY (ou directement pour une notification)
+  NEW_OFFER_PROPOSED = 'mission_new_offer_proposed', // Une nouvelle offre est proposée à un chauffeur spécifique
+
+  // Événements pour ASSIGNMENT_EVENTS_STREAM_KEY (pour AssignmentWorker)
+  OFFER_ACCEPTED_BY_DRIVER = 'mission_offer_accepted_by_driver', // Un chauffeur a ACCEPTÉ une offre
+  OFFER_REFUSED_BY_DRIVER = 'mission_offer_refused_by_driver', // Un chauffeur a REFUSÉ une offre
+  OFFER_EXPIRED_FOR_DRIVER = 'mission_offer_expired_for_driver', // L'offre a EXPIRÉ pour un chauffeur (peut être publié par un autre service ou par AssignmentWorker lui-même)
+  MANUALLY_ASSIGNED = 'mission_manually_assigned', // Une mission a été assignée manuellement par un admin
+
+  // Événements pour informer D'AUTRES systèmes (par exemple, facturation, suivi),
+  // pourraient aller sur ASSIGNMENT_EVENTS_STREAM_KEY ou un autre stream dédié si nécessaire.
+  // AssignmentWorker pourrait aussi les écouter pour arrêter la recherche.
+  COMPLETED = 'mission_completed', // La mission est terminée avec succès
+  CANCELLED_BY_ADMIN = 'mission_cancelled_by_admin', // La mission a été annulée par un admin
+  CANCELLED_BY_SYSTEM = 'mission_cancelled_by_system', // La mission a été annulée par le système (ex: pas de chauffeur trouvé après N tentatives)
+  FAILED = 'mission_failed', // La mission a échoué pour une raison opérationnelle
+
+  NEW_ORDER_READY_FOR_ASSIGNMENT = 'mission_new_order_ready_for_assignment',
 }
 
-// Interface for event data to enforce structure
-interface EventData {
-  type: RedisEventType
+// --- Event Data Structure ---
+// Interface de base pour les données d'événements liés aux missions
+
+
+export interface MissionEventData {
+  type: MissionLifecycleEvent
   orderId: string
   driverId?: string
-  [key: string]: string | number | undefined
+  timestamp: number
+  [key: string]: string | number | boolean | undefined | null
 }
+
+// Interface spécifique pour une nouvelle offre
+export interface NewOfferProposedData extends MissionEventData {
+  type: MissionLifecycleEvent.NEW_OFFER_PROPOSED
+  driverId: string // Obligatoire ici
+  remuneration: number
+  offerExpiresAt: string // ISO string pour l'expiration de cette offre spécifique
+}
+
+export interface RawInitialAssignmentDetails {
+  pickupCoordinates?: [number, number];
+  totalWeightG?: number;
+  initialRemuneration?: number;
+}
+
+
+export interface NewOrderReadyForAssignmentData extends MissionEventData {
+  type: MissionLifecycleEvent.NEW_ORDER_READY_FOR_ASSIGNMENT;
+  // Ce champ sera une chaîne JSON dans le message Redis
+  initialAssignmentDetails?: string; // CHANGEMENT ICI: le type est string
+  initialAssignmentDetails_parsed?: any;
+}
+// Interface spécifique pour un refus
+export interface OfferRefusedData extends MissionEventData {
+  type: MissionLifecycleEvent.OFFER_REFUSED_BY_DRIVER
+  driverId: string // Le chauffeur qui refuse (anciennement refusingDriverId)
+  reason?: string // Optionnel: raison du refus
+}
+
+// Interface spécifique pour une expiration
+export interface OfferExpiredData extends MissionEventData {
+  type: MissionLifecycleEvent.OFFER_EXPIRED_FOR_DRIVER
+  driverId: string // Le chauffeur pour qui l'offre a expiré
+}
+
+// Interface spécifique pour une acceptation
+export interface OfferAcceptedData extends MissionEventData {
+  type: MissionLifecycleEvent.OFFER_ACCEPTED_BY_DRIVER
+  driverId: string // Le chauffeur qui accepte
+}
+
+// Interface spécifique pour une complétion
+export interface MissionCompletedData extends MissionEventData {
+  type: MissionLifecycleEvent.COMPLETED
+  driverId: string // Chauffeur qui a complété
+  finalRemuneration: number // Rémunération finale (peut différer de l'initiale)
+}
+
+// Interface pour annulation
+export interface MissionCancelledData extends MissionEventData {
+  type: MissionLifecycleEvent.CANCELLED_BY_ADMIN | MissionLifecycleEvent.CANCELLED_BY_SYSTEM
+  reasonCode: string
+  cancelledBy: 'admin' | 'system' | 'driver' // Qui a initié
+  // driverId peut être présent si la mission était déjà assignée
+}
+
+// Interface pour échec
+export interface MissionFailedData extends MissionEventData {
+  type: MissionLifecycleEvent.FAILED
+  reasonCode: string
+  details?: string
+  // driverId peut être présent si la mission était déjà assignée
+}
+
 
 class RedisHelper {
   /**
    * Publishes an event to a Redis Stream with retry logic.
-   * @param streamKey - The Redis Stream key (e.g., mission_offers_stream).
-   * @param eventData - The event data as key-value pairs.
+   * @param streamKey - The Redis Stream key.
+   * @param eventData - The event data.
    * @param retries - Number of retries on failure (default: 3).
    * @returns The message ID or null if publishing fails.
    */
-  private async publishEvent(
+  private async publishEventInternal( // Renommé pour éviter confusion avec les méthodes publiques
     streamKey: string,
-    eventData: EventData,
+    eventData: MissionEventData, // Utilise notre interface de base
     retries: number = 3
   ): Promise<string | null> {
-    // Validate required fields
     if (!eventData.orderId) {
       logger.error({ eventData }, `Cannot publish event to ${streamKey}: Missing orderId`)
       return null
@@ -51,11 +140,16 @@ class RedisHelper {
       logger.error({ eventData }, `Cannot publish event to ${streamKey}: Missing event type`)
       return null
     }
-
-    // Convert event data to Redis-compatible array
-    const redisData = Object.entries(eventData)
-      .filter(([_, value]) => value !== undefined && value !== null)
-      .flatMap(([key, value]) => [key, String(value)])
+    const redisData: string[] = []
+    for (const [key, value] of Object.entries(eventData)) {
+      if (value !== undefined && value !== null) {
+        if (typeof value === 'object' && value !== null) {
+          redisData.push(key, JSON.stringify(value));
+        } else {
+          redisData.push(key, String(value));
+        }
+      }
+    }
 
     let attempt = 0
     while (attempt <= retries) {
@@ -66,221 +160,333 @@ class RedisHelper {
             streamKey,
             eventType: eventData.type,
             orderId: eventData.orderId,
+            driverId: eventData.driverId,
             messageId,
           },
-          `Published event to Redis Stream`
+          `Published mission event to Redis Stream`
         )
         return messageId
       } catch (error) {
         attempt++
         logger.warn(
-          { err: error, streamKey, eventData, attempt },
-          `Failed to publish event to Redis Stream (attempt ${attempt}/${retries})`
+          { err: error, streamKey, eventData, attempt, maxRetries: retries },
+          `Failed to publish mission event (attempt ${attempt}/${retries})`
         )
         if (attempt > retries) {
           logger.error(
             { err: error, streamKey, eventData },
-            `Exhausted retries for publishing event to Redis Stream`
+            `Exhausted retries for publishing mission event`
           )
-          // TODO: Trigger monitoring alert (e.g., Sentry, Datadog)
+          // TODO: Trigger monitoring alert
           return null
         }
-        // Exponential backoff: wait 100ms * 2^attempt
         await new Promise((resolve) => setTimeout(resolve, 100 * Math.pow(2, attempt)))
       }
     }
     return null
   }
 
+  // --- Méthodes de publication spécifiques aux missions ---
+
   /**
-   * Publishes a new mission offer to the mission_offers_stream.
+   * Publishes a new mission offer to a driver.
+   * This event might be consumed by a system that notifies the driver.
+   * It does NOT directly trigger reassignment logic, but its expiration or refusal will.
+   *
    * @param orderId - The order ID.
-   * @param driverId - The driver ID.
-   * @param initialRemuneration - The initial remuneration for the mission.
+   * @param driverId - The driver ID to whom the offer is made.
+   * @param remuneration - The remuneration for this offer.
+   * @param offerExpiresAt - ISO string timestamp for when this specific offer expires.
    * @returns The message ID or null if publishing fails.
    */
-  async publishMissionOffer(
+  async publishNewMissionOffer(
     orderId: string,
     driverId: string,
-    initialRemuneration: number
+    remuneration: number,
+    offerExpiresAt: string // ex: DateTime.now().plus({ seconds: 60 }).toISO()
   ): Promise<string | null> {
-    if (initialRemuneration < 0) {
-      logger.error({ orderId, driverId }, `Invalid remuneration: ${initialRemuneration}`)
+    if (remuneration < 0) {
+      logger.error(
+        { orderId, driverId, remuneration },
+        `Invalid remuneration for new mission offer`
+      )
       return null
     }
+    // TODO: Valider que offerExpiresAt est une date ISO valide et dans le futur
 
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_OFFER,
+    const eventData: NewOfferProposedData = {
+      type: MissionLifecycleEvent.NEW_OFFER_PROPOSED,
       orderId,
       driverId,
-      remuneration: initialRemuneration,
+      remuneration,
+      offerExpiresAt,
       timestamp: Date.now(),
-      status: 'new',
     }
-
-    return this.publishEvent(MISSION_OFFER_STREAM_KEY, eventData)
+    // Ce stream est-il le bon ? Si c'est juste pour notifier, peut-être direct vers NOTIFICATION_QUEUE_STREAM
+    // Ou si un autre service gère l'offre active, alors MISSION_OFFER_STREAM_KEY est ok.
+    // Pour l'instant, je garde MISSION_OFFER_STREAM_KEY comme dans le code original.
+    return this.publishEventInternal(MISSION_OFFER_STREAM_KEY, eventData)
   }
 
   /**
-   * Publishes a mission acceptance event to the assignment_logic_stream.
+   * Publishes a mission acceptance event.
+   * Consumed by AssignmentWorker to stop further searches and confirm assignment.
+   *
    * @param orderId - The order ID.
    * @param driverId - The driver ID who accepted the mission.
    * @returns The message ID or null if publishing fails.
    */
-  async publishMissionAccepted(orderId: string, driverId: string): Promise<string | null> {
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_ACCEPTED,
+  async publishMissionOfferAccepted(orderId: string, driverId: string): Promise<string | null> {
+    const eventData: OfferAcceptedData = {
+      type: MissionLifecycleEvent.OFFER_ACCEPTED_BY_DRIVER,
       orderId,
       driverId,
       timestamp: Date.now(),
     }
-
-    return this.publishEvent(ASSIGNMENT_LOGIC_STREAM_KEY, eventData)
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
   }
 
   /**
-   * Publishes a mission refusal event to the assignment_logic_stream.
+   * Publishes a mission refusal event.
+   * Consumed by AssignmentWorker to try finding another driver.
+   *
    * @param orderId - The order ID.
-   * @param refusingDriverId - The driver ID who refused the mission.
+   * @param driverId - The driver ID who refused the mission.
+   * @param reason - Optional reason for refusal.
    * @returns The message ID or null if publishing fails.
    */
-  async publishMissionRefused(orderId: string, refusingDriverId: string): Promise<string | null> {
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_REFUSED,
+  async publishMissionOfferRefused(
+    orderId: string,
+    driverId: string,
+    reason?: string
+  ): Promise<string | null> {
+    const eventData: OfferRefusedData = {
+      type: MissionLifecycleEvent.OFFER_REFUSED_BY_DRIVER,
       orderId,
-      driverId: refusingDriverId,
+      driverId, // Le chauffeur qui a refusé
+      reason,
       timestamp: Date.now(),
     }
-
-    return this.publishEvent(ASSIGNMENT_LOGIC_STREAM_KEY, eventData)
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
   }
 
   /**
-   * Publishes a mission completion event to the assignment_logic_stream.
-   * Used by admin_mark_as_success to trigger driver payment.
+   * Publishes an event indicating an offer has expired for a specific driver.
+   * Consumed by AssignmentWorker to try finding another driver.
+   * This might be published by AssignmentWorker itself after a scan, or by another service.
+   *
+   * @param orderId - The order ID.
+   * @param driverId - The driver ID for whom the offer expired.
+   * @returns The message ID or null if publishing fails.
+   */
+  async publishMissionOfferExpired(orderId: string, driverId: string): Promise<string | null> {
+    const eventData: OfferExpiredData = {
+      type: MissionLifecycleEvent.OFFER_EXPIRED_FOR_DRIVER,
+      orderId,
+      driverId,
+      timestamp: Date.now(),
+    }
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
+  }
+
+  /**
+   * Publishes a mission completion event.
+   * Can be consumed by various services (billing, stats, AssignmentWorker to finalize).
+   *
    * @param orderId - The order ID.
    * @param driverId - The driver ID who completed the mission.
-   * @param remuneration - The final remuneration amount.
+   * @param finalRemuneration - The final remuneration amount.
    * @returns The message ID or null if publishing fails.
    */
   async publishMissionCompleted(
     orderId: string,
     driverId: string,
-    remuneration: number
+    finalRemuneration: number
   ): Promise<string | null> {
-    if (remuneration < 0) {
-      logger.error({ orderId, driverId }, `Invalid remuneration: ${remuneration}`)
+    if (finalRemuneration < 0) {
+      logger.error(
+        { orderId, driverId, finalRemuneration },
+        `Invalid final remuneration for mission completion`
+      )
       return null
     }
-
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_COMPLETED,
+    const eventData: MissionCompletedData = {
+      type: MissionLifecycleEvent.COMPLETED,
       orderId,
       driverId,
-      remuneration,
+      finalRemuneration,
       timestamp: Date.now(),
     }
-
-    return this.publishEvent(ASSIGNMENT_LOGIC_STREAM_KEY, eventData)
+    // Pourrait aller sur un stream plus général 'mission_updates_stream' ou rester sur ASSIGNMENT_EVENTS_STREAM_KEY
+    // si AssignmentWorker doit en être informé (par exemple pour nettoyer des états internes).
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
   }
 
   /**
-   * Publishes a mission cancellation event to the assignment_logic_stream.
-   * Used by admin_cancel_order to notify workers of cancellation.
+   * Publishes a mission cancellation event (initiated by an admin).
+   *
    * @param orderId - The order ID.
-   * @param driverId - The driver ID (if assigned).
    * @param reasonCode - The cancellation reason code.
+   * @param assignedDriverId - Optional: The driver ID if the mission was already assigned.
    * @returns The message ID or null if publishing fails.
    */
-  async publishMissionCancelled(
+  async publishMissionCancelledByAdmin(
     orderId: string,
-    driverId: string | null,
-    reasonCode: string
+    reasonCode: string,
+    assignedDriverId?: string
   ): Promise<string | null> {
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_CANCELLED,
+    const eventData: MissionCancelledData = {
+      type: MissionLifecycleEvent.CANCELLED_BY_ADMIN,
       orderId,
-      driverId: driverId ?? undefined,
+      driverId: assignedDriverId,
       reasonCode,
+      cancelledBy: 'admin',
       timestamp: Date.now(),
     }
-
-    return this.publishEvent(ASSIGNMENT_LOGIC_STREAM_KEY, eventData)
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
   }
 
   /**
-   * Publishes a mission failure event to the assignment_logic_stream.
-   * Used by admin_mark_as_failed to notify workers of failure.
+ * Publishes a mission cancellation event (initiated by the system).
+ * E.g., no driver found after max attempts.
+ *
+ * @param orderId - The order ID.
+ * @param reasonCode - The cancellation reason code.
+ * @returns The message ID or null if publishing fails.
+ */
+  async publishMissionCancelledBySystem(
+    orderId: string,
+    reasonCode: string,
+  ): Promise<string | null> {
+    const eventData: MissionCancelledData = {
+      type: MissionLifecycleEvent.CANCELLED_BY_SYSTEM,
+      orderId,
+      reasonCode,
+      cancelledBy: 'system',
+      timestamp: Date.now(),
+    }
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
+  }
+
+
+  /**
+   * Publishes a mission failure event.
+   *
    * @param orderId - The order ID.
-   * @param driverId - The driver ID (if assigned).
    * @param reasonCode - The failure reason code.
    * @param details - Additional details about the failure.
+   * @param assignedDriverId - Optional: The driver ID if the mission was assigned.
    * @returns The message ID or null if publishing fails.
    */
   async publishMissionFailed(
     orderId: string,
-    driverId: string | null,
     reasonCode: string,
-    details: string
+    details?: string,
+    assignedDriverId?: string
   ): Promise<string | null> {
-    const eventData: EventData = {
-      type: RedisEventType.MISSION_FAILED,
+    const eventData: MissionFailedData = {
+      type: MissionLifecycleEvent.FAILED,
       orderId,
-      driverId: driverId ?? undefined,
+      driverId: assignedDriverId,
       reasonCode,
       details,
       timestamp: Date.now(),
     }
-
-    return this.publishEvent(ASSIGNMENT_LOGIC_STREAM_KEY, eventData)
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
   }
 
   /**
+   * Publishes an event when a mission is manually assigned to a driver by an admin.
+   * Consumed by AssignmentWorker to potentially stop any ongoing automated assignment processes
+   * and to ensure the system reflects the manual assignment.
+   *
+   * @param orderId - The order ID.
+   * @param driverId - The driver ID to whom the mission was manually assigned.
+   * @param assignedByAdminId - The ID of the admin who performed the assignment.
+   * @returns The message ID or null if publishing fails.
+   */
+  async publishMissionManuallyAssigned(
+    orderId: string,
+    driverId: string,
+    assignedByAdminId: string
+  ): Promise<string | null> {
+    const eventData: MissionEventData & { assignedByAdminId: string } = { // Utilisation d'une intersection de type ici
+      type: MissionLifecycleEvent.MANUALLY_ASSIGNED,
+      orderId,
+      driverId,
+      assignedByAdminId,
+      timestamp: Date.now(),
+    };
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData);
+  }
+
+
+  /**
+ * Publishes an event indicating a new order is created and ready for driver assignment.
+ * Consumed by AssignmentWorker to initiate the driver search and offer process.
+ *
+ * @param orderId - The ID of the newly created order.
+ * @param details - Optional: Key details about the order to help the first assignment attempt.
+ * @returns The message ID or null if publishing fails.
+ */
+  async publishNewOrderReadyForAssignment(
+    orderId: string,
+    details?: RawInitialAssignmentDetails // Utilise le type de l'interface
+  ): Promise<string | null> {
+    const eventData: NewOrderReadyForAssignmentData = {
+      type: MissionLifecycleEvent.NEW_ORDER_READY_FOR_ASSIGNMENT,
+      orderId,
+      timestamp: Date.now(),
+      initialAssignmentDetails: details ? JSON.stringify(details) : undefined,
+    }
+    return this.publishEventInternal(ASSIGNMENT_EVENTS_STREAM_KEY, eventData)
+  }
+
+
+  /**
    * Ajoute une demande d'envoi de notification Push à la queue Redis.
-   * @param fcmToken Le token FCM (si déjà connu, sinon le worker le cherchera)
-   * @param notification Contenu de la notification (title, body)
-   * @param data Payload de données pour la notification
+   * (Cette méthode reste globalement la même, mais utilise le nouveau nom de stream)
+   * @param notificationPayload - Contenu de la notification.
    * @returns L'ID du message ajouté au stream ou null en cas d'erreur.
    */
-  async enqueuePushNotification({
-    fcmToken,
-    title,
-    body,
-    data,
-    // type,
-  }: NotificationPayload): Promise<string | null> {
-    if (!fcmToken) {
-      logger.warn({ title, body }, `Tentative d'enqueue notif sans FCM token. Skipping.`)
-      // Ou: Le worker pourrait chercher le token basé sur targetId si fourni. Pour l'instant on skip.
-      return null
+  async enqueuePushNotification(
+    notificationPayload: NotificationPayload // Assurez-vous que NotificationPayload est bien défini
+  ): Promise<string | null> {
+    const { fcmToken, title, body, data } = notificationPayload;
+
+    if (!fcmToken) { // Ou !fcmToken si c'est une chaîne vide et non null/undefined
+      logger.warn({ title, body, data }, `Attempting to enqueue notification without FCM token. Skipping.`);
+      return null;
     }
 
     try {
-      // Sérialise les données si elles existent
-      const dataString = data ? JSON.stringify(data) : '{}'
-      const eventData = [
-        'fcmToken',
-        fcmToken,
-        'title',
-        title,
-        'body',
-        body,
-        'data',
-        dataString, // Data en JSON string
-        'timestamp',
-        String(Date.now()),
-      ]
-      const messageId = await redis.xadd(NOTIFICATION_QUEUE_STREAM, '*', ...eventData)
+      const dataString = data ? JSON.stringify(data) : '{}';
+      const redisMessageData = [
+        'fcmToken', fcmToken,
+        'title', title,
+        'body', body,
+        'data', dataString,
+        'timestamp', String(Date.now()),
+      ];
+
+      // S'il y a un type dans notificationPayload.data, on pourrait le sortir au niveau supérieur aussi
+      if (data && typeof data === 'object' && 'type' in data) {
+        redisMessageData.push('notificationType', String(data.type));
+      }
+
+
+      const messageId = await redis.xadd(NOTIFICATION_QUEUE_STREAM, '*', ...redisMessageData);
       logger.debug(
-        `Notification enqueued to Redis Stream ${NOTIFICATION_QUEUE_STREAM}. Target Token: ${fcmToken}, Msg ID: ${messageId}`
-      )
-      return messageId
+        { messageId, stream: NOTIFICATION_QUEUE_STREAM, fcmToken: fcmToken.substring(0, 10) + "..." },
+        `Notification enqueued to Redis Stream`
+      );
+      return messageId;
     } catch (error) {
       logger.error(
-        { err: error, fcmToken, title },
-        `Failed to enqueue notification to Redis Stream ${NOTIFICATION_QUEUE_STREAM}`
-      )
-      return null
+        { err: error, fcmToken, title, stream: NOTIFICATION_QUEUE_STREAM },
+        `Failed to enqueue notification to Redis Stream`
+      );
+      return null;
     }
   }
 }

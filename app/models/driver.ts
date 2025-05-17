@@ -8,15 +8,24 @@ import DriverAvailabilityException from './driver_availability_exception.js'
 import GeoService from '#services/geo_service'
 import DriverVehicle from './driver_vehicle.js'
 import UserDocument from './user_document.js'
-import OrderTransaction from './order_transaction.js'
+import OrderTransaction, { PaymentMethod } from './order_transaction.js'
 import User from './user.js'
 import DriversStatus, { DriverStatus } from './drivers_status.js'
 import { cuid } from '@adonisjs/core/helpers'
 import BaseModel from './base_model.js'
-interface DeliveryStats {
-  success: number
-  failure: number
-  total: number
+
+type Status = 'success' | 'accept' | 'refuse' | 'failure'
+
+interface DeliveryStat {
+  status: Status
+  timestamp: string // ou Date
+}
+
+
+interface MobileMoney {
+  number: PaymentMethod
+  provider: string
+  status: 'active' | 'inactive'
 }
 
 export default class Driver extends BaseModel {
@@ -29,9 +38,13 @@ export default class Driver extends BaseModel {
   @column()
   declare client_id: string | null // Client propriétaire du livreur
 
+  @column({
+    prepare: (value) => JSON.stringify(value),
+  })
+  declare mobile_money: MobileMoney[]
+
 
   @column({
-    // consume: GeoService.wktToPointAsGeoJSON,
     consume: GeoService.wktToGeoJsonPoint,
     prepare: GeoService.pointToWkt,
   })
@@ -43,7 +56,7 @@ export default class Driver extends BaseModel {
   @column({
     prepare: (value) => JSON.stringify(value),
   })
-  declare delivery_stats: DeliveryStats
+  declare delivery_stats: Record<string, DeliveryStat>
 
   @column.dateTime({ autoCreate: true })
   declare created_at: DateTime

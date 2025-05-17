@@ -8,9 +8,12 @@ import User from './user.js'
 import BaseModel from './base_model.js'
 import db from '@adonisjs/lucid/services/db'
 export interface StatusMetadata {
-  reason: string
+  reason?: string
   details?: string
-  deliveryType?: string
+  waypoint_sequence: number
+  waypoint_status?: string
+  waypoint_type?: string
+
 }
 export default class OrderStatusLog extends BaseModel {
   @column({ isPrimary: true })

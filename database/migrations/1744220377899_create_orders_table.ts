@@ -23,13 +23,16 @@ export default class extends BaseSchema {
       table.string('confirmation_delivery_code').nullable()
       table.string('confirmation_pickup_code').nullable()
       table.integer('remuneration').defaultTo(0).checkPositive()
-      table.jsonb('route_instructions').nullable()
-      table.specificType('route_geometry', 'geometry(LineString, 4326)').notNullable()
-      table.integer('route_distance_meters').notNullable()
+      // table.jsonb('route_instructions').nullable()
+      // table.integer('route_duration_seconds').notNullable()
+      // table.specificType('route_geometry', 'geometry(LineString, 4326)').notNullable()
+      // table.integer('route_distance_meters').notNullable()
       table.string('currency').defaultTo('CFA')
+      table.integer('assignment_attempt_count').defaultTo(0)
       table.jsonb('proof_of_pickup_media').defaultTo('[]')
       table.jsonb('proof_of_delivery_media').defaultTo('[]')
       table.integer('order_number_in_batch').nullable()
+
       table
         .enum('calculation_engine', Object.values(CalculationEngine))
         .defaultTo(CalculationEngine.VALHALLA)
@@ -37,7 +40,7 @@ export default class extends BaseSchema {
       table.enum('cancellation_reason_code', Object.values(CancellationReasonCode)).nullable()
       table.enum('failure_reason_code', Object.values(FailureReasonCode)).nullable()
       table.integer('client_fee').unsigned().notNullable()
-      table.integer('route_duration_seconds').notNullable()
+      table.jsonb('waypoints_summary').nullable()
       table
         .string('pickup_address_id')
         .references('id')
@@ -52,7 +55,7 @@ export default class extends BaseSchema {
         .onDelete('SET NULL')
       // table.enum('status', Object.values(OrderStatus)).defaultTo(OrderStatus.PENDING)
       table.timestamp('delivery_date', { useTz: true }).notNullable()
-      table.timestamp('delivery_date_estimation', { useTz: true }).notNullable()
+      table.timestamp('delivery_date_estimation', { useTz: true }).nullable().comment('Estimation globale basée sur la somme des legs')
       // Ajoute la colonne pour savoir à qui l'offre est faite
       table
         .string('offered_driver_id')

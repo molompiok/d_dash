@@ -35,6 +35,8 @@ export default class DriversStatus extends BaseModel {
     foreignKey: 'driver_id',
   })
   declare driver: relations.BelongsTo<typeof Driver>
+
+
   @beforeCreate()
   static async preventDuplicateStatus(log: DriversStatus) {
     const driver = await Driver.find(log.driver_id)

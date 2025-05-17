@@ -14,6 +14,7 @@ export default class extends BaseSchema {
         .notNullable()
         .unique()
       table.string('latest_status').nullable()
+      table.jsonb('mobile_money').defaultTo('[]')
       table.boolean('is_valid_driver').notNullable().defaultTo(false)
       table.float('average_rating').notNullable().defaultTo(0)
       table.specificType('current_location', 'geometry(Point, 4326)').nullable() // Position GPS
@@ -22,7 +23,7 @@ export default class extends BaseSchema {
       table.timestamp('created_at').notNullable()
       table.timestamp('updated_at').notNullable()
 
-      table.jsonb('delivery_stats').defaultTo('{}') // { success: number, failure: number, total: number }
+      table.jsonb('delivery_stats').defaultTo('[]') // [{status : string ; order_id : string ; timestamps : string[] }]
       table.index(['current_location'], 'idx_drivers_location', { indexType: 'gist' }) // Index GIST pour PostGIS
     })
   }

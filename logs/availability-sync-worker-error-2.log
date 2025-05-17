@@ -1,0 +1,19 @@
+2025-05-12 04:21:47.270 +00:00: 
+2025-05-12 04:21:47.270 +00:00:    TypeError:
+2025-05-12 04:21:47.270 +00:00: Cannot
+2025-05-12 04:21:47.270 +00:00: read
+2025-05-12 04:21:47.270 +00:00: properties
+2025-05-12 04:21:47.270 +00:00: of
+2025-05-12 04:21:47.270 +00:00: undefined
+2025-05-12 04:21:47.270 +00:00: (reading
+2025-05-12 04:21:47.270 +00:00: 'add')
+2025-05-12 04:21:47.270 +00:00:  
+2025-05-12 04:21:47.270 +00:00:    at OrderRouteLeg.boot app/models/order_route_leg.ts:22
+2025-05-12 04:21:47.270 +00:00: 
+2025-05-12 04:21:47.270 +00:00:    ⁃ DecorateProperty
+2025-05-12 04:21:47.270 +00:00:      node_modules/.pnpm/reflect-metadata@0.2.2/node_modules/reflect-metadata/Reflect.js:561
+2025-05-12 04:21:47.270 +00:00:    ⁃ Reflect.decorate
+2025-05-12 04:21:47.270 +00:00:      node_modules/.pnpm/reflect-metadata@0.2.2/node_modules/reflect-metadata/Reflect.js:136
+2025-05-12 04:21:47.270 +00:00:    ⁃ _ts_decorate
+2025-05-12 04:21:47.270 +00:00:      app/models/order_route_leg.ts:4
+2025-05-12 04:21:47.270 +00:00: 

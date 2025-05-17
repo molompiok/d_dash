@@ -1,10 +1,11 @@
 import { DateTime } from 'luxon'
-import { column, belongsTo } from '@adonisjs/lucid/orm'
+import { column, belongsTo, beforeCreate } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import Client from './client.js'
 import BaseModel from './base_model.js'
+import { cuid } from '@adonisjs/core/helpers'
 export default class OrderTransaction extends BaseModel {
   @column({ isPrimary: true })
   declare id: string
@@ -27,6 +28,10 @@ export default class OrderTransaction extends BaseModel {
   @column()
   declare transaction_reference: string
 
+  //visa , mastercard, paypal, etc
+  @column()
+  declare payment_method: PaymentMethod
+
   @column()
   declare amount: number
 
@@ -36,7 +41,10 @@ export default class OrderTransaction extends BaseModel {
   @column({
     prepare: (value) => JSON.stringify(value),
   })
-  declare history_status: string[]
+  declare history_status: { status: OrderTransactionStatus, timestamp: string }[]
+
+  @column()
+  declare metadata: Record<string, any>
 
   @column.dateTime()
   declare payment_date: DateTime
@@ -56,6 +64,19 @@ export default class OrderTransaction extends BaseModel {
 
   @belongsTo(() => Client)
   declare client: BelongsTo<typeof Client>
+
+  @beforeCreate()
+  public static async assignCuid(transaction: OrderTransaction) {
+    if (!transaction.id) {
+      transaction.id = cuid()
+    }
+  }
+}
+export enum PaymentMethod {
+  MTN = 'mtn',
+  ORANGE = 'orange',
+  MOOV = 'moov',
+  WAVE = 'wave',
 }
 
 export enum OrderTransactionStatus {
@@ -63,6 +84,7 @@ export enum OrderTransactionStatus {
   SUCCESS = 'success',
   FAILED = 'failed',
 }
+
 export enum OrderTransactionType {
   DRIVER_PAYMENT = 'driver_payment',
   DRIVER_PENALTY = 'driver_penalty',

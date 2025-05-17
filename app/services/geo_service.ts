@@ -46,6 +46,15 @@ export default class GeoService {
     }
   }
 
+  // Dans GeoService.ts (exemple simplifié)
+  static geoJsonLineStringToWkt(lineString: { type: 'LineString'; coordinates: number[][] }): string | null {
+    if (lineString.type !== 'LineString' || !lineString.coordinates || lineString.coordinates.length < 2) {
+      return null;
+    }
+    const coordsString = lineString.coordinates.map(coord => `${coord[0]} ${coord[1]}`).join(',');
+    return `LINESTRING(${coordsString})`;
+  }
+
   /**
    * PREPARE: Convertit un objet GeoJSON Point (de l'application) en chaîne WKT.
    * Cette fonction est destinée à être utilisée avec db.raw(`ST_GeomFromText(?, 4326)`)

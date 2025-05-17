@@ -21,9 +21,8 @@ import { cuid } from '@adonisjs/core/helpers'
 import { DateTime } from 'luxon'
 
 // --- Import des Helpers/Wrappers (chemins à adapter) ---
-import GeoHelper from '#services/geo_helper' // Fonctions geocodeAddress, calculateRouteDetails
-import PricingHelper, { SimplePackageInfo } from '#services/pricing_helper' // Fonction calculateFees
-import RedisHelper from '#services/redis_helper' // Fonction publishMissionOffer
+import { SimplePackageInfo } from '#services/pricing_helper' // Fonction calculateFees
+import RedisHelper, { RawInitialAssignmentDetails } from '#services/redis_helper' // Fonction publishMissionOffer
 // --- Fin Imports Helpers ---
 
 // --- Import des Validateurs ---
@@ -33,6 +32,9 @@ import env from '#start/env'
 import Client from '#models/client'
 import redis_helper from '#services/redis_helper'
 import { NotificationType } from '#models/notification'
+import geo_helper from '#services/geo_helper'
+import pricing_helper from '#services/pricing_helper'
+import OrderRouteLeg from '#models/order_route_leg'
 // --- Fin Imports Validateurs ---
 
 const cancelOrderValidator = vine.compile(
@@ -79,31 +81,70 @@ const packageDimensionsValidator = vine.object({
   height_cm: vine.number().positive().optional(),
 })
 
-export const createOrderValidator = vine.compile(
+const packageInfoValidator = vine.object({
+  name: vine.string().trim().minLength(1),
+  description: vine.string().trim().optional(),
+  dimensions: packageDimensionsValidator.optional(),
+  mention_warning: vine.enum(PackageMentionWarning).optional(),
+  quantity: vine.number().min(1).positive(),
+  // image_urls: vine.array(vine.string().url()).optional(), // Si tu gères les images
+})
+
+// Waypoint individuel
+const waypointValidator = vine.object({
+  address_text: vine.string().trim().minLength(5).maxLength(255),
+  type: vine.enum(['pickup', 'delivery'] as const), // Important le 'as const' pour typer correctement
+  // Les informations sur le colis ne sont requises que si type === 'pickup'
+  // On ne peut pas faire de requiredWhen direct ici, la validation se fera en partie dans le contrôleur
+  package_infos: vine.array(packageInfoValidator).optional(), // Rendre optionnel ici
+  contact_name: vine.string().trim().optional(),
+  contact_phone: vine.string().trim().optional(), // Ajouter validation de format si besoin
+  note: vine.string().trim().optional(), // Note spécifique au waypoint
+})
+
+interface ValidatedWaypoint {
+  address_text: string;
+  type: 'pickup' | 'delivery';
+  package_infos?: ValidatedPackageInfo;
+  contact_name?: string;
+  contact_phone?: string;
+  note?: string;
+}
+
+interface ValidatedPackageInfo {
+  name: string;
+  description?: string;
+  dimensions: {
+    weight_g: number;
+    depth_cm?: number;
+    width_cm?: number;
+    height_cm?: number;
+  };
+  mention_warning?: PackageMentionWarning;
+  quantity: number;
+}
+
+export const createOrderWithWaypointsValidator = vine.compile(
   vine.object({
-    // Adresses en texte simple (la validation de la *validité* de l'adresse est déléguée au géocodage)
-    pickup_address_text: vine.string().trim().minLength(3),
-    delivery_address_text: vine.string().trim().minLength(3),
-
-    // Détails des colis
-    packages: vine
-      .array(
-        vine.object({
-          name: vine.string().trim().minLength(3), // Nom/Description courte
-          description: vine.string().trim().optional().optional(),
-          dimensions: packageDimensionsValidator,
-          mention_warning: vine.enum(PackageMentionWarning).optional(), // Enum pour fragile, froid, etc.
-          quantity: vine.number().min(1),
-          //   image_urls: vine.array(vine.string().url()), // Si on permet au client de joindre des images
-        })
-      )
-      .minLength(1),
-
-    // Autres infos
-    note_order: vine.string().minLength(5).trim().optional().nullable(), // Instructions spéciales
-    // delivery_date_request: vine.string().regex(...).optional() // Si on permet de demander une date/heure
+    waypoints: vine
+      .array(waypointValidator)
+      .minLength(2) // Au moins un pickup et une livraison
+      .bail(false), // Continue la validation même si un waypoint est invalide pour voir toutes les erreurs
+    priority: vine.enum(['low', 'medium', 'high'] as const).optional(), // Utilise OrderPriority enum
+    global_order_note: vine.string().trim().optional(),
+    // Tu pourrais ajouter ici d'autres champs globaux pour la commande
+    // ex: requested_delivery_time_slot, etc.
   })
 )
+
+interface ProcessedWaypoint {
+  id: string; // CUID généré pour ce waypoint traité (utile pour le résumé)
+  original_payload: ValidatedWaypoint;
+  address_model: Address;
+  coordinates: [number, number]; // lon, lat
+  type_for_valhalla: 'break' | 'through';
+  package_infos_for_db?: Omit<Package, 'id' | 'order_id' | 'created_at' | 'updated_at' | 'is_return'>[]; // Pour créer les Package modèles
+}
 
 @inject()
 export default class OrderController {
@@ -124,7 +165,6 @@ export default class OrderController {
    * POST /orders
    */
   async create_order({ request, response, auth }: HttpContext) {
-    await auth.check()
     const user = await auth.authenticate()
     await user.load('client')
     if (!user.client) {
@@ -132,340 +172,380 @@ export default class OrderController {
     }
     const clientId = user.client.id
 
-    // TODO: Vérifier la limite d'abonnement du client si implémenté.
+    const OFFER_DURATION_SECONDS = env.get('DRIVER_OFFER_DURATION_SECONDS')
 
-    // --- Configuration Globale (depuis env ou config) ---
-    const OFFER_DURATION_SECONDS = Number.parseInt(
-      env.get('DRIVER_OFFER_DURATION_SECONDS', '20'),
-      10
-    )
-    const ETA_BUFFER_MINUTES = Number.parseInt(env.get('DELIVERY_ETA_BUFFER_MINUTES', '15'), 10)
-    const DRIVER_SEARCH_RADIUS_KM = Number.parseInt(env.get('DRIVER_SEARCH_RADIUS_KM', '10'), 10)
-    const ASSIGNMENT_MAX_CANDIDATES = 5 // Nb max de drivers récupérés par la requête initiale
-    // ------------------------------------------------------
-
-    // 1. Valider le payload
     let payload
     try {
-      payload = await request.validateUsing(createOrderValidator)
+      payload = await request.validateUsing(createOrderWithWaypointsValidator)
+      logger.info({ payload }, `Validation payload création commande client ${clientId}`)
     } catch (validationError) {
-      logger.warn(
-        { err: validationError },
-        `Validation failed for order creation by client ${clientId}`
-      )
-      return response.badRequest({
-        message: 'Données invalides.',
-        errors: validationError.messages,
-      })
+      logger.warn({ err: validationError.messages }, `Validation payload création commande client ${clientId}`)
+      return response.badRequest({ message: 'Données de commande invalides.', errors: validationError.messages })
     }
 
-    let pickupAddress: Address | null = null
-    let deliveryAddress: Address | null = null
-    let newOrder: Order | null = null
+    // Validation Manuelle Supplémentaire
+    const pickupWaypoints = payload.waypoints.filter(wp => wp.type === 'pickup');
+    const deliveryWaypoints = payload.waypoints.filter(wp => wp.type === 'delivery');
+
+    if (pickupWaypoints.length === 0) {
+      return response.badRequest({ message: 'Au moins un point de collecte est requis.' });
+    }
+    if (deliveryWaypoints.length === 0) {
+      return response.badRequest({ message: 'Au moins un point de livraison est requis.' });
+    }
+    for (const wp of pickupWaypoints) {
+      if (!wp.package_infos || wp.package_infos.length === 0) {
+        return response.badRequest({
+          message: `Les informations sur le colis sont requises pour le point de collecte : "${wp.address_text}".`
+        });
+      }
+    }
+
+
     const trx = await db.transaction()
+    let newOrder: Order | null = null
 
     try {
-      // 2. Géocodage (Gestion Erreur spécifique)
-      let pickupCoords
-      let deliveryCoords
-      try {
-        pickupCoords = await GeoHelper.geocodeAddress(payload.pickup_address_text)
-        logger.info(`Adresse de départ géocodée: ${JSON.stringify(pickupCoords)}`)
-        if (!pickupCoords) throw new Error(`Adresse de départ introuvable: ${payload.pickup_address_text}`)
-        deliveryCoords = await GeoHelper.geocodeAddress(payload.delivery_address_text)
-        logger.info(`Adresse de livraison géocodée: ${JSON.stringify(deliveryCoords)}`)
-        if (!deliveryCoords) throw new Error(`Adresse de livraison introuvable: ${payload.delivery_address_text}`)
-      } catch (geoError) {
-        await trx.rollback() // Important d'annuler même si l'erreur est avant les écritures DB
-        logger.warn(
-          { err: geoError },
-          `Geocoding failed during order creation for client ${clientId}`
-        )
-        // Message plus générique pour ne pas exposer les détails de l'adresse si l'erreur vient de là
-        return response.badRequest({
-          message: `Erreur lors de la validation de l'adresse: ${geoError.message}`,
-        })
-      }
+      // 1. Géocoder toutes les adresses des waypoints et les préparer
+      const processedWaypoints: ProcessedWaypoint[] = []
+      const allPackageInfosForDb: Omit<Package, | 'order_id' | 'created_at' | 'updated_at' | 'is_return'>[] = []
 
-      // 3. Création Addresses
-      pickupAddress = await Address.create(
-        {
-          id: cuid(),
-          street_address: payload.pickup_address_text,
-          city: pickupCoords.city || 'N/A',
-          postal_code: pickupCoords.postcode || 'N/A',
-          country: pickupCoords.country_code?.toUpperCase() || 'N/A',
-          coordinates: { type: 'Point', coordinates: pickupCoords.coordinates },
-          address_details: JSON.stringify(pickupCoords), // Stocke les détails bruts pour ref
-        },
-        { client: trx }
-      )
-      deliveryAddress = await Address.create(
-        {
-          id: cuid(),
-          street_address: payload.delivery_address_text,
-          city: deliveryCoords.city || 'N/A',
-          postal_code: deliveryCoords.postcode || 'N/A',
-          country: deliveryCoords.country_code?.toUpperCase() || 'N/A',
-          coordinates: { type: 'Point', coordinates: deliveryCoords.coordinates },
-        },
-        { client: trx }
-      )
-
-      // 4. Calcul Itinéraire & Prix (Gestion Erreur spécifique)
-      let routeDetails
-      let clientFee: number
-      let driverRemuneration: number
-      try {
-        routeDetails = await GeoHelper.calculateRouteDetails(
-          pickupAddress.coordinates.coordinates,
-          deliveryAddress.coordinates.coordinates
-        )
-        if (!routeDetails) throw new Error("Impossible de calculer l'itinéraire.")
-
-        const packageInfoForPricing: SimplePackageInfo[] = payload.packages.map((pkg) => ({
-          name: pkg.name,
-          dimensions: pkg.dimensions,
-          quantity: pkg.quantity,
-        }))
-        const fees = await PricingHelper.calculateFees(
-          routeDetails.distanceMeters,
-          routeDetails.durationSeconds,
-          packageInfoForPricing
-        )
-        clientFee = fees.clientFee
-        driverRemuneration = fees.driverRemuneration
-      } catch (routePriceError) {
-        await trx.rollback()
-        logger.warn(
-          { err: routePriceError },
-          `Routing/Pricing failed for order creation for client ${clientId}`
-        )
-        return response.badRequest({
-          message: `Erreur de calcul de l'itinéraire ou du prix: ${routePriceError.message}`,
-        })
-      }
-      const estimatedDeliveryTime = DateTime.now()
-        .plus({ seconds: routeDetails.durationSeconds })
-        .plus({ minutes: ETA_BUFFER_MINUTES }) // Buffer configurable
-
-      // 5. Créer l'objet Order (avec champs offre init à null)
-      newOrder = await Order.create(
-        {
-          id: cuid(),
-          client_id: clientId,
-          driver_id: null,
-          pickup_address_id: pickupAddress.id,
-          delivery_address_id: deliveryAddress.id,
-          priority: OrderPriority.MEDIUM,
-          note_order: payload.note_order,
-          //   currency: env.get('APP_CURRENCY', 'EUR'),
-          client_fee: Math.round(clientFee), //TODO mettre float dans la DB
-          remuneration: Math.round(driverRemuneration), //TODO mettre float dans la DB
-          route_distance_meters: routeDetails.distanceMeters,
-          route_duration_seconds: routeDetails.durationSeconds,
-          route_geometry: routeDetails.geometry,
-          calculation_engine: routeDetails.engine,
-          delivery_date_estimation: estimatedDeliveryTime,
-          delivery_date: DateTime.now().plus({ seconds: routeDetails.durationSeconds + (ETA_BUFFER_MINUTES + 600) * 60 * 60 * 1000 }),
-          proof_of_pickup_media: [],
-          proof_of_delivery_media: [],
-          cancellation_reason_code: null,
-          failure_reason_code: null,
-          offered_driver_id: null, // --- Ajouté pour Scénario Idéal ---
-          offer_expires_at: null, // --- Ajouté pour Scénario Idéal ---
-        },
-        { client: trx }
-      )
-
-      // 6. Créer Packages
-      if (!payload.packages || payload.packages.length === 0)
-        throw new Error('Liste de colis vide.')
-      const packagesData = payload.packages.map((pkgData) => ({
-        id: cuid(),
-        order_id: newOrder!.id,
-        name: pkgData.name,
-        description: pkgData.description,
-        dimensions: pkgData.dimensions,
-        mention_warning: pkgData.mention_warning,
-        quantity: pkgData.quantity || 1,
-        image_urls: [],
-        is_return: false,
-      }))
-      await Package.createMany(packagesData, { client: trx })
-
-      // 7. Créer Log PENDING initial
-      await OrderStatusLog.create(
-        {
-          id: cuid(),
-          order_id: newOrder!.id,
-          status: OrderStatus.PENDING,
-          changed_at: newOrder!.created_at,
-          changed_by_user_id: user.id,
-          current_location: pickupAddress.coordinates,
-          metadata: null,
-          created_at: newOrder!.created_at ?? DateTime.now(),
-        },
-        { client: trx }
-      )
-
-      // 8. --- DÉCLENCHEMENT OFFRE INITIALE (SCÉNARIO IDÉAL) ---
-      let offerSent = false // Flag pour savoir si l'offre a bien été notifiée
-      try {
-        const pickupPoint = pickupAddress.coordinates.coordinates
-
-        // TODO: Calculer poids/volume total ici pour filtre véhicule
-        const totalWeightG = payload.packages.reduce(
-          (sum, pkg) => sum + pkg.dimensions.weight_g * (pkg.quantity || 1),
-          0
-        )
-        // const totalVolumeM3 = ... calcul similaire ...
-
-        // Requête améliorée avec vérification véhicule basique (poids)
-        const availableDrivers = await Driver.query({ client: trx })
-          // Jointure pour obtenir le dernier statut
-          .joinRaw(
-            `
-                   INNER JOIN (
-                       SELECT driver_id, status, changed_at
-                       FROM driver_statuses ds1
-                       WHERE changed_at = (SELECT MAX(changed_at) FROM driver_statuses ds2 WHERE ds1.driver_id = ds2.driver_id)
-                   ) latest_status ON latest_status.driver_id = drivers.id
-               `
-          )
-          .preload('vehicles', (vQuery) => vQuery.where('status', VehicleStatus.ACTIVE)) // Véhicules actifs seulement
-          .where('latest_status.status', DriverStatus.ACTIVE) // Driver prêt
-          .whereNotNull('current_location') // Driver a partagé sa position
-          // Filtre par distance PostGIS
-          .whereRaw(
-            'ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) <= ?',
-            [
-              pickupPoint[0], // longitude
-              pickupPoint[1], // latitude
-              DRIVER_SEARCH_RADIUS_KM * 1000, // distance en mètres
-            ]
-          )
-          // TODO: Filtre par capacité/type de véhicule vs package (plus complexe, nécessite jointure/filtre sur vehicles préchargés)
-          .orderByRaw('drivers.average_rating DESC NULLS LAST') // Meilleure note d'abord
-          .orderByRaw(
-            'ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) ASC',
-            [pickupPoint[0], pickupPoint[1]]
-          ) // Plus proche ensuite
-          .limit(ASSIGNMENT_MAX_CANDIDATES) // Limite le nombre de candidats potentiels
-
-        // --- Filtrage Véhicule Post-Requête (Exemple Simplifié) ---
-        const suitableDriver = availableDrivers.find(
-          (driver) =>
-            driver.vehicles.length > 0 && // Au moins un véhicule ACTIF
-            driver.vehicles.some((v) => v.max_weight_kg >= totalWeightG) // Au moins un véhicule peut prendre le poids
-          // && driver.vehicles.some(v => /* test volume */)
-          // && driver.vehicles.some(v => /* test frigo si besoin */)
-        )
-        // --- Fin Filtrage Véhicule ---
-
-        if (suitableDriver) {
-          const selectedDriver = suitableDriver
-          const expiresAt = DateTime.now().plus({ seconds: OFFER_DURATION_SECONDS })
-
-          //   a. Mettre à jour l'Order avec l'offre
-          newOrder.offered_driver_id = selectedDriver.id
-          newOrder.offer_expires_at = expiresAt
-          await newOrder.save() // Toujours via trx
-
-          //   b. Notifier le driver (via Push)
-          if (selectedDriver.fcm_token) {
-            const notifTitle = 'Nouvelle Mission Disponible'
-            const notifBody = `Course #${newOrder.id.substring(0, 6)}... Rém: ${newOrder.remuneration} ${newOrder.currency}. Acceptez avant ${expiresAt.toFormat('HH:mm:ss')}`
-            const notifData = {
-              type: NotificationType.NEW_MISSION_OFFER,
-              orderId: newOrder.id,
-              offerExpiresAt: expiresAt.toISO(),
-            }
-            const pushSent = await redis_helper.enqueuePushNotification({
-              fcmToken: selectedDriver.fcm_token,
-              title: notifTitle,
-              body: notifBody,
-              data: notifData,
-              // type: NotificationType.NEW_MISSION_OFFER,
-            })
-            if (pushSent) {
-              logger.info(
-                `Offre initiale Order ${newOrder.id} notifiée Driver ${selectedDriver.id}`
-              )
-              offerSent = true
-            } else {
-              logger.warn(
-                `Échec envoi push offre Order ${newOrder.id} à Driver ${selectedDriver.id}. Annulation offre.`
-              )
-              // Annuler l'offre sur l'order si l'envoi échoue
-              newOrder.offered_driver_id = null
-              newOrder.offer_expires_at = null
-              await newOrder.save() // via trx
-              // TODO: Que faire ensuite ? Essayer un autre driver? Mettre en attente ? -> Dépend de la logique du Worker/Batch
-            }
-          } else {
-            logger.warn(
-              `Driver ${selectedDriver.id} (suitable) n'a pas de FCM Token. Annulation offre.`
-            )
-            // Annuler l'offre car non notifiable
-            newOrder.offered_driver_id = null
-            newOrder.offer_expires_at = null
-            await newOrder.save() // via trx
-            // TODO: Essayer prochain driver?
-          }
-        } else {
-          logger.warn(`Aucun driver approprié (dispo+véhicule) trouvé pour Order ${newOrder.id}.`)
-          // L'order reste PENDING sans offre active.
+      for (const waypointPayload of payload.waypoints) {
+        const geocoded = await geo_helper.geocodeAddress(waypointPayload.address_text)
+        if (!geocoded) {
+          await trx.rollback()
+          logger.warn(`Géocodage échoué pour l'adresse: ${waypointPayload.address_text}`)
+          return response.badRequest({ message: `L'adresse "${waypointPayload.address_text}" n'a pas pu être trouvée ou validée.` })
         }
-      } catch (assignmentError) {
-        // Erreur PENDANT la recherche de driver ou l'envoi de notif, après la création de la commande
-        logger.error(
-          { err: assignmentError, orderId: newOrder!.id },
-          "Erreur pendant la phase d'offre initiale. La commande reste PENDING."
+
+        // Créer ou trouver l'Address model
+        // Pour la simplicité, on crée toujours. En prod, tu voudrais vérifier si elle existe.
+        const addressModel = await Address.create(
+          {
+            id: cuid(),
+            street_address: waypointPayload.address_text,
+            city: geocoded.city || 'N/A',
+            postal_code: geocoded.postcode || 'N/A',
+            country: geocoded.country_code || 'N/A',
+            coordinates: { type: 'Point', coordinates: geocoded.coordinates },
+            // address_details: JSON.stringify(geocoded.rawDetails) // Si tu veux stocker plus
+          },
+          { client: trx }
         )
-        // Ne pas rollback la transaction ici, car la commande a bien été créée.
-        // Le worker/batch devra gérer cette commande.
+
+        const processedWp: any = {
+          id: cuid(), // ID unique pour ce waypoint traité
+          original_payload: waypointPayload,
+          address_model: addressModel,
+          coordinates: geocoded.coordinates as [number, number],
+          type_for_valhalla: 'break', // Tous les waypoints sont des arrêts
+          package_infos_for_db: []
+        };
+
+        if (waypointPayload.type === 'pickup' && waypointPayload.package_infos && waypointPayload.package_infos.length > 0) {
+          processedWp.package_infos_for_db = waypointPayload.package_infos.map(pkgInfo => {
+            // pkgInfo est de type ValidatedPackageInfoItem
+            return {
+              id: cuid(),
+              name: pkgInfo.name,
+              description: pkgInfo.description,
+              dimensions: pkgInfo.dimensions,
+              mention_warning: pkgInfo.mention_warning,
+              quantity: pkgInfo.quantity,
+              image_urls: [], // pkgInfo.image_urls || [],
+            };
+          });
+          allPackageInfosForDb.push(...processedWp.package_infos_for_db);
+        }
+        processedWaypoints.push(processedWp);
       }
-      // --- Fin Déclenchement Offre ---
 
-      // 9. TODO: MAJ compteur client
 
-      // 10. Commit la transaction (Création Order/Addr/Pack/Log ET potentiel état d'offre)
+      // 2. Créer l'Order de base
+      // Le premier waypoint de type 'pickup' est considéré comme le pickup_address_id global.
+      // Le dernier waypoint de type 'delivery' est le delivery_address_id global.
+      const firstPickupProcessed = processedWaypoints.find(wp => wp.original_payload.type === 'pickup');
+      const lastDeliveryProcessed = [...processedWaypoints].reverse().find(wp => wp.original_payload.type === 'delivery');
+
+      if (!firstPickupProcessed || !lastDeliveryProcessed) {
+        // Ne devrait pas arriver à cause des validations précédentes
+        throw new Error("Logique de premier pickup / dernière livraison erronée.");
+      }
+
+      newOrder = new Order()
+      newOrder.useTransaction(trx)
+      const priority = (payload.priority || OrderPriority.MEDIUM) as OrderPriority
+      newOrder.fill({
+        id: cuid(),
+        client_id: clientId,
+        pickup_address_id: firstPickupProcessed.address_model.id,
+        delivery_address_id: lastDeliveryProcessed.address_model.id,
+        priority: priority,
+        note_order: payload.global_order_note,
+        client_fee: 500,
+        remuneration: 500,
+        delivery_date: DateTime.now().plus({ seconds: OFFER_DURATION_SECONDS }),
+      })
+
+      await newOrder.save()
+
+      // 3. Préparer les waypoints pour GeoHelper.calculateOptimizedRoute
+      // Ici, l'ordre des `processedWaypoints` est l'ordre fourni par le client.
+      // Si tu as besoin d'optimiser cet ordre (TSP), c'est ici qu'il faudrait le faire.
+      // Pour l'instant, on prend l'ordre tel quel.
+      const waypointsForValhallaRoute = processedWaypoints.map((pwp, _index) => ({
+        coordinates: pwp.coordinates,
+        type: pwp.type_for_valhalla,
+        address_id: pwp.address_model.id,
+        address_text: pwp.original_payload.address_text,
+        waypoint_type_for_summary: pwp.original_payload.type,
+        package_name_for_summary: pwp.original_payload.type === 'pickup' && pwp.package_infos_for_db && pwp.package_infos_for_db.length > 0
+          ? pwp.package_infos_for_db[0].name + (pwp.package_infos_for_db.length > 1 ? ` (+${pwp.package_infos_for_db.length - 1})` : '')
+          : undefined,
+      }));
+
+
+      // 4. Calculer l'itinéraire et les legs
+      const routeDetails = await geo_helper.calculateOptimizedRoute(waypointsForValhallaRoute)
+      if (!routeDetails) {
+        await trx.rollback()
+        logger.error(`Impossible de calculer l'itinéraire pour la nouvelle commande ${newOrder.id}`)
+        return response.internalServerError({ message: "Erreur lors du calcul de l'itinéraire." })
+      }
+
+
+      // 5. Mettre à jour l'Order avec les infos de route et calculer les frais
+      newOrder.calculation_engine = routeDetails.calculation_engine
+      newOrder.delivery_date_estimation = DateTime.now().plus({ seconds: routeDetails.global_summary.total_duration_seconds })
+      newOrder.waypoints_summary = routeDetails.waypoints_summary_for_order || null; // Construit par GeoHelper
+
+      const packageInfoForPricing = allPackageInfosForDb.map(pkg => ({
+        name: pkg.name,
+        dimensions: pkg.dimensions, // Assure-toi que dimensions est bien du type attendu
+        quantity: pkg.quantity,
+      }));
+
+      const fees = await pricing_helper.calculateFees(
+        routeDetails.global_summary.total_distance_meters,
+        routeDetails.global_summary.total_duration_seconds,
+        packageInfoForPricing as SimplePackageInfo[]
+      );
+      newOrder.client_fee = Math.round(fees.clientFee);
+      newOrder.remuneration = Math.round(fees.driverRemuneration);
+      await newOrder.save()
+
+
+      // 6. Créer les OrderRouteLegs
+      for (let i = 0; i < routeDetails.legs.length; i++) {
+        const legDataFromHelper = routeDetails.legs[i];
+        // Le leg `i` va de `waypointsForValhallaRoute[i]` à `waypointsForValhallaRoute[i+1]`
+        const startWpForThisLeg = waypointsForValhallaRoute[i];
+        const endWpForThisLeg = waypointsForValhallaRoute[i + 1];
+
+        if (!startWpForThisLeg || !endWpForThisLeg) {
+          logger.error(`Manque d'info waypoint pour le leg ${i} lors de la création OrderRouteLeg.`);
+          // Gérer cette erreur critique, peut-être en annulant la transaction
+          await trx.rollback();
+          return response.internalServerError({ message: `Erreur interne lors de la construction de l'itinéraire (leg ${i}).` });
+        }
+
+        const orderRouteLeg = new OrderRouteLeg()
+        orderRouteLeg.useTransaction(trx)
+        orderRouteLeg.fill({
+          order_id: newOrder.id,
+          leg_sequence: i,
+          geometry: legDataFromHelper.geometry,
+          duration_seconds: legDataFromHelper.duration_seconds,
+          distance_meters: legDataFromHelper.distance_meters,
+          maneuvers: legDataFromHelper.maneuvers,
+          raw_valhalla_leg_data: legDataFromHelper.raw_valhalla_leg_data,
+          start_address_id: startWpForThisLeg.address_id, // Peut être null si le premier leg part du driver
+          end_address_id: endWpForThisLeg.address_id,
+          start_coordinates: { type: 'Point', coordinates: startWpForThisLeg.coordinates },
+          end_coordinates: { type: 'Point', coordinates: endWpForThisLeg.coordinates },
+        })
+        await orderRouteLeg.save()
+      }
+
+
+      if (allPackageInfosForDb.length > 0) {
+        const packagesToCreate = allPackageInfosForDb.map(pkgInfo => ({
+          ...pkgInfo,
+          order_id: newOrder!.id,
+        }));
+        await Package.createMany(packagesToCreate, { client: trx });
+      } else if (payload.waypoints.some(wp => wp.type === 'pickup')) {
+        // Sécurité: si on a des pickups mais aucun package n'a été préparé (devrait être attrapé par la validation manuelle)
+        await trx.rollback();
+        logger.error(`Logique d'erreur: des pickups étaient présents mais aucun package n'a été préparé pour la commande ${newOrder?.id}`);
+        return response.internalServerError({ message: "Erreur lors de la préparation des informations des colis." });
+      }
+
+
+      // 8. Créer le Log PENDING initial
+      const firstPickupCoordinates = firstPickupProcessed.address_model.coordinates;
+      await OrderStatusLog.create({
+        id: cuid(),
+        order_id: newOrder.id,
+        status: OrderStatus.PENDING,
+        changed_at: newOrder.created_at,
+        changed_by_user_id: user.id,
+        current_location: firstPickupCoordinates, // Optionnel, mais peut être utile
+      },
+        { client: trx }
+      )
+
+
       await trx.commit()
 
-      // 11. Réponse au client
-      const message = offerSent
-        ? 'Commande créée. Une offre a été envoyée à un livreur.'
-        : "Commande créée. Recherche d'un livreur en cours..."
-      // Charge les relations nécessaires pour la réponse
-      await newOrder.load('pickup_address')
-      await newOrder.load('delivery_address')
-      await newOrder.load('packages') // Charge tous les packages créés
+      try {
+        const orderForEvent = newOrder! // newOrder est non null ici
+        const firstPickupProcessed = processedWaypoints.find(wp => wp.original_payload.type === 'pickup'); // Déjà calculé
+        const totalWeightG = allPackageInfosForDb.reduce( // Déjà calculé
+          (sum, pkg) => sum + (pkg.dimensions?.weight_g || 0) * (pkg.quantity || 1), 0
+        );
+
+        const assignmentDetails: RawInitialAssignmentDetails = {
+          // S'assurer que firstPickupWaypointData et ses coordonnées existent
+          pickupCoordinates: firstPickupProcessed?.coordinates,
+          totalWeightG: totalWeightG, // Assurez-vous que totalWeightG est bien calculé et disponible ici
+          initialRemuneration: orderForEvent.remuneration
+        };
+        await redis_helper.publishNewOrderReadyForAssignment(
+          orderForEvent.id,
+          assignmentDetails
+        );
+        logger.info(`Event NEW_ORDER_READY_FOR_ASSIGNMENT published for Order ${orderForEvent.id}`);
+      } catch (eventError) {
+        logger.error({ err: eventError, orderId: newOrder!.id }, "Failed to publish NEW_ORDER_READY_FOR_ASSIGNMENT event.");
+        // La commande est créée, AssignmentWorker la prendra via son scan, mais avec un délai.
+      }
+
+      // 10. Réponse au client
+      await newOrder.load(loader => {
+        loader.load('pickup_address') // Adresse globale
+          .load('delivery_address') // Adresse globale
+          .load('packages')
+          .load('route_legs', q => q.orderBy('leg_sequence', 'asc'))
+      })
+
+      const message = "Commande créée. Recherche d'un livreur en cours..."
 
       return response.created({
         message: message,
-        order: newOrder.serialize({ fields: { omit: ['confirmation_code'] } }),
+        order: newOrder.serialize({
+          fields: { omit: ['confirmation_delivery_code', 'confirmation_pickup_code'] },
+          relations: {
+            route_legs: {
+              fields: {
+                pick: ['leg_sequence', 'duration_seconds', 'distance_meters', 'geometry', 'maneuvers', 'start_coordinates', 'end_coordinates']
+              }
+            },
+            packages: { fields: { pick: ['name', 'quantity', 'dimensions'] } },
+            // pickup_address et delivery_address seront sérialisés par défaut
+          }
+        }),
       })
+
     } catch (error) {
-      // Gérer ici les erreurs survenues AVANT ou PENDANT la transaction, MAIS PAS après le commit
-      if (!trx.isCompleted) {
-        // S'assure que le rollback n'est pas déjà fait
+      if (trx.isCompleted === false && trx.isTransaction === false) { // Vérifier si la transaction est toujours active
         await trx.rollback()
       }
-      logger.error(
-        { err: error, clientId: clientId, payload: payload },
-        'Erreur globale création commande store'
-      )
-      if (error.code === 'E_VALIDATION_ERROR') {
-        // Devrait être attrapé avant
-        return response.badRequest({ message: 'Données invalides.', errors: error.messages })
-      }
-      // Retourner des erreurs plus spécifiques attrapées plus tôt si possible
-      if (error.status) return response.status(error.status).send({ message: error.message })
+      logger.error({ err: error, clientId }, 'Erreur globale création commande avec waypoints')
+      return response.internalServerError({ message: error.message || 'Erreur serveur lors de la création de la commande.' })
+    }
+  }
 
-      return response.internalServerError({
-        message: 'Erreur serveur lors de la création de la commande.',
+  // ... La méthode rerouteOrderLeg reste similaire à la version précédente ...
+  // Assure-toi d'importer et d'utiliser rerouteLegValidator
+  async reroute_order_leg({ request, response, params, auth }: HttpContext) {
+    const rerouteLegValidator = vine.compile(
+      vine.object({
+        current_location: vine.object({
+          latitude: vine.number().min(-90).max(90),
+          longitude: vine.number().min(-180).max(180),
+        }),
+        // Optionnel: tu pourrais ajouter costing_model si le driver peut changer de mode
+        // costing_model: vine.enum(['auto', 'bicycle', 'pedestrian']).optional()
       })
+    )
+    // const user = auth.getUserOrFail(); // Utilise si tu as besoin d'identifier le driver
+    await auth.check();
+
+
+    let payload;
+    try {
+      payload = await request.validateUsing(rerouteLegValidator);
+    } catch (validationError) {
+      logger.warn({ err: validationError.messages }, 'Validation rerouteLeg failed');
+      return response.badRequest({ message: 'Données invalides.', errors: validationError.messages });
+    }
+
+    const { orderId, legSequence: legSequenceParam } = params;
+    const legSequence = parseInt(legSequenceParam, 10);
+
+    if (isNaN(legSequence) || legSequence < 0) {
+      return response.badRequest({ message: 'Numéro de séquence du leg invalide.' });
+    }
+
+    try {
+      const order = await Order.query()
+        .where('id', orderId)
+        // Optionnel : .where('driver_id', user.driver.id) si le reroutage est initié par le driver assigné
+        .preload('route_legs', (query) => { // Précharge tous les legs pour trouver celui qui nous intéresse
+          query.orderBy('leg_sequence', 'asc');
+        })
+        .firstOrFail(); // Lance une exception si non trouvé
+
+      const targetLeg = order.route_legs.find(leg => leg.leg_sequence === legSequence);
+
+      logger.info({ current_location: payload.current_location }, 'current_location ⛔⛔⛔⛔⛔');
+
+      if (!targetLeg || !targetLeg.end_coordinates) {
+        return response.notFound({ message: `Leg ${legSequence} non trouvé ou destination manquante pour la commande ${orderId}.` });
+      }
+
+      const driverCurrentLocation: [number, number] = [
+        payload.current_location.longitude,
+        payload.current_location.latitude,
+      ];
+      const legDestinationCoordinates: [number, number] = [
+        targetLeg.end_coordinates.coordinates[0], // lon
+        targetLeg.end_coordinates.coordinates[1], // lat
+      ];
+
+      // logger.info({ driverCurrentLocation, legDestinationCoordinates }, 'RerouteLeg');
+
+      const reroutedLegData = await geo_helper.rerouteLeg(
+        driverCurrentLocation,
+        legDestinationCoordinates
+      );
+
+      if (!reroutedLegData) {
+        logger.error(`Échec du reroutage pour Order ${orderId}, Leg ${legSequence}`);
+        return response.internalServerError({ message: 'Impossible de recalculer l\'itinéraire pour ce segment.' });
+      }
+
+      // logger.info({ reroutedLegData }, 'RerouteLeg');
+
+      return response.ok({
+        message: 'Segment d\'itinéraire recalculé.',
+        order_id: orderId,
+        leg_sequence: legSequence,
+        rerouted_leg: {
+          geometry: reroutedLegData.geometry,
+          duration_seconds: reroutedLegData.duration_seconds,
+          distance_meters: reroutedLegData.distance_meters,
+          maneuvers: reroutedLegData.maneuvers,
+        },
+      });
+
+    } catch (error) {
+      logger.error({ err: error, orderId, legSequence }, 'Erreur lors du reroutage du leg');
+      if (error.code === 'E_ROW_NOT_FOUND') {
+        return response.notFound({ message: 'Commande non trouvée.' });
+      }
+      return response.internalServerError({ message: 'Erreur serveur lors du reroutage.' });
     }
   }
 
@@ -599,7 +679,13 @@ export default class OrderController {
           status: OrderStatus.CANCELLED,
           changed_at: DateTime.now(),
           changed_by_user_id: user.id,
-          metadata,
+          metadata: {
+            reason: metadata?.reason,
+            details: metadata?.details,
+            waypoint_sequence: -1,
+            waypoint_status: undefined,
+            waypoint_type: undefined,
+          },
           current_location: order.pickup_address.coordinates,
         },
         { client: trx }
@@ -769,7 +855,7 @@ export default class OrderController {
           q
             .orderBy('changed_at', 'desc')
             //@ts-ignore
-            .preload('changed_by_user', (u) => u.select(['id', 'full_name', 'role']))
+            .preload('changed_by_user', (u) => u.select(['id', 'full_name']))
         ) // Historique complet avec user
         .first()
 
@@ -852,12 +938,12 @@ export default class OrderController {
           if (order.delivery_address?.coordinates) {
             try {
               // Itinéraire de la position ACTUELLE du driver vers la livraison
-              const routeToDelivery = await GeoHelper.calculateRouteDetails(
-                order.driver.current_location.coordinates,
-                order.delivery_address.coordinates.coordinates
+              const routeToDelivery = await geo_helper.calculateOptimizedRoute(
+                [{ coordinates: [order.driver.current_location.coordinates[0], order.driver.current_location.coordinates[1]], type: 'through' },
+                { coordinates: [order.delivery_address.coordinates.coordinates[0], order.delivery_address.coordinates.coordinates[1]], type: 'through' }]
               )
               if (routeToDelivery) {
-                estimatedTimeToArrivalSeconds = routeToDelivery.durationSeconds
+                estimatedTimeToArrivalSeconds = routeToDelivery.global_summary.total_duration_seconds
               }
             } catch (etaError) {
               logger.warn({ err: etaError, orderId }, 'Failed to calculate ETA for tracking')
@@ -1059,7 +1145,7 @@ export default class OrderController {
           status: OrderStatus.ACCEPTED, // Statut devient ACCEPTED
           changed_at: DateTime.now(),
           changed_by_user_id: adminUser.id, // L'admin initie ce statut
-          metadata: { reason: 'assigned_by_admin' }, // Metadata indiquant l'origine
+          metadata: { reason: 'assigned_by_admin', waypoint_sequence: -1, waypoint_status: undefined, waypoint_type: undefined, }, // Metadata indiquant l'origine
           current_location: logLocation,
         },
         { client: trx }
@@ -1086,6 +1172,20 @@ export default class OrderController {
       // 10. Commit Transaction
       await trx.commit()
 
+      try {
+        await redis_helper.publishMissionManuallyAssigned(
+          orderId,
+          driver_id, // Le chauffeur assigné
+          adminUser.id // L'ID de l'admin qui a fait l'assignation
+        )
+        logger.info(`Event MANUALLY_ASSIGNED published for Order ${orderId}, Driver ${driver_id}.`)
+      } catch (eventError) {
+        logger.error({ err: eventError, orderId, driverId: driver_id }, "Failed to publish MANUALLY_ASSIGNED event after admin assignment.");
+        // L'assignation a réussi, mais l'événement n'a pas été publié.
+        // C'est une situation à surveiller, mais l'état principal (assignation) est correct.
+      }
+
+
       logger.info(
         `Order ${orderId} manually assigned to driver ${driver_id} by admin ${adminUser.id} - COMMITTED.`
       )
@@ -1098,11 +1198,12 @@ export default class OrderController {
           .orderBy('changed_at', 'desc')
           .limit(5)
           //@ts-ignore
-          .preload('changed_by_user', (u) => u.select(['id', 'full_name', 'role']))
+          .preload('changed_by_user', (u) => u.select(['id', 'full_name']))
       ) // Récent historique
       await order.load('pickup_address')
       await order.load('delivery_address')
       await order.load('packages')
+      // await order.load('route_legs')
 
       return response.ok({
         message: `Livreur ${driver_id} assigné avec succès à la commande ${orderId}.`,
@@ -1130,7 +1231,7 @@ export default class OrderController {
         return response.notFound({ message: "Commande ou Livreur non trouvé pendant l'opération." })
       }
       // Autres erreurs
-      return response.internalServerError({ message: "Erreur serveur lors de l'assignation." })
+      return response.internalServerError({ message: "Erreur serveur lors de l'assignation.", error })
     }
   } // Fin admin_assign_driver
 
@@ -1221,6 +1322,9 @@ export default class OrderController {
           metadata: {
             // Ajouter la raison de l'annulation aux metadata
             reason: reason_code,
+            waypoint_sequence: -1,
+            waypoint_status: undefined,
+            waypoint_type: undefined,
             details: reason_details ?? undefined, // Ne met pas 'details' si null
           },
         },
@@ -1310,6 +1414,22 @@ export default class OrderController {
       // 7. Commit Transaction
       await trx.commit()
 
+      try {
+        // L'ID du chauffeur assigné (s'il y en avait un) est dans order.driver_id
+        // que nous avons chargé (ou il est null).
+        await redis_helper.publishMissionCancelledByAdmin(
+          orderId,
+          reason_code, // La raison de l'annulation
+          order.driver_id! // Peut être null si la commande n'était pas encore assignée
+        )
+        logger.info(`Event CANCELLED_BY_ADMIN published for Order ${orderId}.`)
+      } catch (eventError) {
+        logger.error({ err: eventError, orderId }, "Failed to publish CANCELLED_BY_ADMIN event after admin cancellation.");
+        // L'annulation a réussi, mais l'événement n'a pas été publié.
+        // C'est une situation à surveiller.
+      }
+
+
       logger.info(`Order ${orderId} cancelled successfully by Admin ${adminUser.id}`)
 
       // 8. Réponse Succès
@@ -1345,7 +1465,8 @@ export default class OrderController {
       // Autres erreurs serveur
       return response.internalServerError({ message: "Erreur serveur lors de l'annulation." })
     }
-  } // Fin admin_cancel_order
+  } // Fin admin_cancel_order //Un service de remboursement client pourrait écouter
+  //  cet événement pour initier un remboursement si la commande était prépayée.
 
   /**
    * [ADMIN] Marque manuellement une commande comme SUCCESS (Livrée).
@@ -1446,6 +1567,9 @@ export default class OrderController {
           metadata: {
             reason: success_reason_code,
             details: reason_details ?? undefined,
+            waypoint_sequence: -1,
+            waypoint_status: undefined,
+            waypoint_type: undefined,
           },
         },
         { client: trx }
@@ -1507,22 +1631,6 @@ export default class OrderController {
           }
         }
 
-        // Trigger payment
-        try {
-          const paymentEventId = await RedisHelper.publishMissionCompleted(
-            orderId,
-            assignedDriverId,
-            order.remuneration
-          )
-          logger.info(
-            `Payment event published for Order ${orderId}, Driver ${assignedDriverId}. Event ID: ${paymentEventId || 'none'}`
-          )
-        } catch (redisError) {
-          logger.error(
-            { err: redisError, orderId, driverId: assignedDriverId },
-            'Failed to publish payment event for successful order.'
-          )
-        }
       } else if (assignedDriverId) {
         logger.info(
           `Order ${orderId} marked SUCCESS by admin. Driver ${assignedDriverId} was assigned but status was ${currentStatus}. Triggering payment.`
@@ -1555,6 +1663,35 @@ export default class OrderController {
 
       // Commit
       await trx.commit()
+      if (assignedDriverId) { // assignedDriverId a été défini plus haut (order.driver_id)
+        try {
+          // Utiliser la rémunération finale de la commande.
+          // Si la rémunération peut être ajustée par l'admin lors de cette action,
+          // il faudrait la récupérer du payload et la passer ici.
+          // Pour l'instant, on utilise order.remuneration.
+          await redis_helper.publishMissionCompleted(
+            orderId,
+            assignedDriverId,
+            order.remuneration // ou une `finalRemuneration` si l'admin peut l'ajuster
+          )
+          logger.info(`Event COMPLETED published for Order ${orderId}, Driver ${assignedDriverId} for payment and other processes.`)
+        } catch (eventError) {
+          logger.error(
+            { err: eventError, orderId, driverId: assignedDriverId },
+            "Failed to publish COMPLETED event after admin marked order as success."
+          );
+          // La commande est marquée comme SUCCESS, mais le processus de paiement n'a pas été
+          // automatiquement déclenché via l'événement. Nécessitera une intervention manuelle
+          // ou un autre mécanisme pour s'assurer que le chauffeur est payé.
+        }
+      } else {
+        // Si aucun chauffeur n'était assigné mais la mission est marquée SUCCESS (cas étrange, mais possible)
+        // il n'y a pas de paiement de chauffeur à déclencher via cet événement.
+        // D'autres logiques (notification client, etc.) pourraient toujours être pertinentes
+        // si un autre service écoute aussi les `COMPLETED` sans `driverId`.
+        // Pour l'instant, on ne publie pas si pas de driverId.
+        logger.info(`Order ${orderId} marked SUCCESS by admin, but no driver was assigned. No COMPLETED event published for driver payment.`);
+      }
       logger.info(`Order ${orderId} marked as SUCCESS by Admin ${adminUser.id} - COMMITTED.`)
 
       // Response
@@ -1687,6 +1824,9 @@ export default class OrderController {
           metadata: {
             reason: failure_reason_code,
             details: reason_details ?? undefined,
+            waypoint_sequence: -1,
+            waypoint_status: undefined,
+            waypoint_type: undefined,
           },
         },
         { client: trx }
@@ -1759,7 +1899,14 @@ export default class OrderController {
         )
         // TODO: Optionally record stats
         const driver = await Driver.findOrFail(assignedDriverId)
-        driver.delivery_stats.failure += 1
+        driver.delivery_stats = driver.delivery_stats || {}
+
+        // Ajoute la nouvelle entrée
+        driver.delivery_stats[orderId] = {
+          status: 'failure',
+          timestamp: DateTime.now().toISO(),
+        }
+
         await driver.save()
         // await DriverStatsService.recordFailure(assignedDriverId, failure_reason_code);
       } else {
@@ -1773,6 +1920,19 @@ export default class OrderController {
 
       // Commit
       await trx.commit()
+
+      try {
+        await redis_helper.publishMissionFailed(
+          orderId,
+          failure_reason_code,
+          reason_details || undefined, // `details` est optionnel dans publishMissionFailed
+          assignedDriverId || undefined // `assignedDriverId` peut être null
+        );
+        logger.info(`Event FAILED published for Order ${orderId}.`);
+      } catch (eventError) {
+        logger.error({ err: eventError, orderId }, "Failed to publish FAILED event after admin marked order as failed.");
+        // La commande est marquée FAILED, mais l'événement n'a pas été publié.
+      }
       logger.info(`Order ${orderId} marked as FAILED by Admin ${adminUser.id} - COMMITTED.`)
 
       // Response

@@ -222,24 +222,28 @@ export default class DriverStatusController {
             `Driver ${driverId} is IN_WORK on ${activeOrders.length} trackable order(s). Emitting location...`
           )
           for (const order of activeOrders) {
-            logger.info(`Emitting location for order ${JSON.stringify(order)}`)
-            order.delivery_address.coordinates
-            const travelTime = await geo_helper.calculateTravelTime(
-              [longitude, latitude],
-              order.delivery_address.coordinates.coordinates,
-              true
-            )
-            logger.info(`Travel time for order ${order.id}: ${JSON.stringify(travelTime)} seconds`)
-            if (order.client?.user_id) {
-              emitter.emit('order:driver_location_updated', {
-                order_id: order.id,
-                client_id: order.client_id,
-                driver_id: driverId,
-                location: { latitude, longitude },
-                timestamp: DateTime.now().toISO(),
-                // TODO: Calculer ETA ici si possible et l'inclure
-                eta_seconds: travelTime?.durationSeconds ?? null,
-              })
+            // logger.info(`Emitting location for order ${JSON.stringify(order)}`)
+            if (order.delivery_address.coordinates) {
+              const coords = order.delivery_address.coordinates.coordinates as [number, number]
+              const travelTime = await geo_helper.getDirectRouteInfo(
+                [longitude, latitude],
+                coords,
+                'auto'
+              )
+              // logger.info(`Travel time for order ${order.id}: ${JSON.stringify(travelTime)} seconds`)
+              if (order.client?.user_id) {
+                emitter.emit('order:driver_location_updated', {
+                  order_id: order.id,
+                  client_id: order.client_id,
+                  driver_id: driverId,
+                  location: { latitude, longitude },
+                  timestamp: DateTime.now().toISO(),
+                  // TODO: Calculer ETA ici si possible et l'inclure
+                  eta_seconds: travelTime?.durationSeconds ?? null,
+                })
+              }
+            } else {
+              logger.warn(`Order ${order.id} has no delivery address coordinates`)
             }
           }
         }
