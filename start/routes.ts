@@ -99,7 +99,8 @@ router.get('/uploads/*', ({ request, response }) => {
 router
   .group(() => {
     router.post('/orders', [OrderController, 'create_order'])
-    router.post('orders/:orderId/legs/:legSequence/reroute', [OrderController, 'reroute_order_leg'])
+    router.get('orders/:order_id/legs/:legSequence/reroute', [OrderController, 'reroute_order_leg'])
+    router.get('orders/:order_id/offer-details', [OrderController, 'get_offer_details'])
     router.patch('/orders/:order_id/waypoints/:waypoint_sequence/status', [MissionController, 'update_waypoint_status'])
   })
   .use(middleware.auth({ guards: ['api'] }))

@@ -12,7 +12,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { NotificationType } from '#models/notification' // Assurez-vous de l'import
 
 // --- Configuration ---
-const NOTIFICATION_STREAM_KEY = env.get('REDIS_NOTIFICATION_STREAM', 'notifications_queue_stream')
+const NOTIFICATION_STREAM_KEY = env.get('REDIS_NOTIFICATION_QUEUE_STREAM')
 const CONSUMER_GROUP_NAME = env.get(
   'REDIS_NOTIFICATION_CONSUMER_GROUP',
   'notification_workers_group'
@@ -76,7 +76,7 @@ export default class NotificationWorker extends BaseCommand {
   }
 
   private async initialize() {
-    initializeFirebaseApp() // Supposée idempotente et gérant ses erreurs
+    await initializeFirebaseApp() // Supposée idempotente et gérant ses erreurs
     logger.info(`🚀 Notification Worker (${this.consumerName}) starting... Stream: ${NOTIFICATION_STREAM_KEY}, Group: ${CONSUMER_GROUP_NAME}`)
     try {
       await this.ensureConsumerGroupExists()
@@ -117,9 +117,11 @@ export default class NotificationWorker extends BaseCommand {
 
     while (this.isRunning) {
       let processedMessagesInCycle = 0
+      logger.info(`Starting new worker cycle. Claim check counter: ${this.claimCheckCounter}, Last PEL check found: ${this.lastPelCheckFoundMessages}`);
       try {
         let claimedMessages: RedisStreamMessage[] = []
         if (this.claimCheckCounter >= CLAIM_CHECK_FREQUENCY || this.lastPelCheckFoundMessages) {
+          logger.info({ numClaimed: claimedMessages.length }, "Claimed pending messages result.");
           this.claimCheckCounter = 0
           claimedMessages = await this.claimPendingMessages()
           this.lastPelCheckFoundMessages = claimedMessages.length > 0
@@ -137,6 +139,7 @@ export default class NotificationWorker extends BaseCommand {
         if (!this.isRunning) break; // Vérifier avant de lire de nouveaux messages
 
         const newMessages = await this.readNewMessages()
+        logger.info({ numNew: newMessages.length }, "Read new messages result.");
         if (newMessages.length > 0) {
           await this.processMessages(newMessages, false)
           processedMessagesInCycle += newMessages.length
@@ -146,6 +149,7 @@ export default class NotificationWorker extends BaseCommand {
 
         if (processedMessagesInCycle === 0 && this.isRunning) {
           // Petite pause si complètement idle pour éviter de marteler XREADGROUP si BLOCK_TIMEOUT_MS est court
+          logger.info("No messages processed in this cycle, pausing briefly.");
           await sleep(200)
         }
 
@@ -175,10 +179,12 @@ export default class NotificationWorker extends BaseCommand {
         NOTIFICATION_STREAM_KEY,
         '>' // '>' signifie seulement les messages jamais délivrés à ce groupe/consommateur
       )) as RedisStreamReadGroupResult
-
-      if (streamsResult && streamsResult.length > 0 && streamsResult[0][1].length > 0) {
-        return streamsResult[0][1]
+      if (!streamsResult || streamsResult.length === 0 || streamsResult[0][1].length === 0) {
+        logger.info({ consumer: this.consumerName, stream: NOTIFICATION_STREAM_KEY }, 'XREADGROUP returned no new messages or timed out.');
+        return [];
       }
+      logger.info({ consumer: this.consumerName, count: streamsResult[0][1].length }, 'XREADGROUP received new messages.');
+      return streamsResult[0][1];
     } catch (error) {
       logger.error({ err: error, consumer: this.consumerName }, 'Redis XREADGROUP (new messages) failed.')
     }
@@ -192,6 +198,7 @@ export default class NotificationWorker extends BaseCommand {
     try {
       // XPENDING <key> <groupname> [IDLE <min-idle-time>] <start> <end> <count> [<consumername>]
       // On ne spécifie pas de consumer pour voir la PEL de tout le groupe
+      logger.info({ consumer: this.consumerName }, "Executing XPENDING to find claimable messages...");
       const pendingSummaryResult: PendingMessageInfo[] | [] = (await redis.xpending(
         NOTIFICATION_STREAM_KEY,
         CONSUMER_GROUP_NAME,
@@ -204,9 +211,10 @@ export default class NotificationWorker extends BaseCommand {
 
 
       if (!pendingSummaryResult || pendingSummaryResult.length === 0) {
-        logger.trace('No suitable pending messages found to claim.')
-        return []
+        logger.info({ consumer: this.consumerName }, 'XPENDING found no suitable messages to claim.');
+        return [];
       }
+      logger.info({ consumer: this.consumerName, count: pendingSummaryResult.length, details: pendingSummaryResult }, 'XPENDING found messages.');
 
       const messagesToClaimDetails: { id: string; deliveryCount: number }[] = []
       for (const msgInfo of pendingSummaryResult) {
@@ -233,12 +241,12 @@ export default class NotificationWorker extends BaseCommand {
       )) as ClaimedMessagesResult
 
       if (claimedResult && claimedResult.length > 0) {
-        logger.info(`Successfully claimed ${claimedResult.length} message(s).`)
+        logger.info({ consumer: this.consumerName, count: claimedResult.length, messageIds: claimedResult.map(m => m[0]) }, `Successfully claimed messages.`);
         // Filtrer les messages pour lesquels on n'a pas pu récupérer le delivery count (ne devrait pas arriver)
         // et s'assurer que `pendingMessageDeliveryCounts` est bien à jour pour les messages effectivement réclamés.
         return claimedResult.filter(msg => this.pendingMessageDeliveryCounts.has(msg[0]));
       } else {
-        logger.info('No messages were actually claimed (possibly claimed by another worker simultaneously or conditions not met).')
+        logger.info({ consumer: this.consumerName }, 'XCLAIM did not actually claim any messages.');
       }
     } catch (error) {
       logger.error({ err: error, consumer: this.consumerName }, 'Error during XPENDING/XCLAIM process.')
@@ -247,7 +255,12 @@ export default class NotificationWorker extends BaseCommand {
   }
 
   private async processMessages(messages: RedisStreamMessage[], isClaimed: boolean) {
-    logger.info(`Processing ${messages.length} message(s) (${isClaimed ? 'claimed' : 'new'})...`)
+    logger.info({
+      count: messages.length,
+      isClaimed,
+      consumer: this.consumerName,
+      messageIds: messages.map(m => m[0])
+    }, `Processing batch of messages.`);
     for (const [messageId, fieldsArray] of messages) {
       if (!this.isRunning) {
         logger.info(`Worker shutting down. Halting message processing for ${messageId}.`)
@@ -259,7 +272,7 @@ export default class NotificationWorker extends BaseCommand {
       for (let i = 0; i < fieldsArray.length; i += 2) {
         messageData[fieldsArray[i]] = fieldsArray[i + 1]
       }
-
+      logger.warn({ messageId, isClaimed, rawMessageDataFromRedis: messageData, consumer: this.consumerName }, "Raw message data received by worker for processing");
       let deliveryCount = 1 // Par défaut pour un nouveau message
       if (isClaimed) {
         deliveryCount = this.pendingMessageDeliveryCounts.get(messageId) || 1 // Utiliser le vrai deliveryCount
@@ -283,6 +296,8 @@ export default class NotificationWorker extends BaseCommand {
       try {
         taskResult = await this.processNotificationTask(messageData)
 
+        logger.info({ messageId, taskResult, deliveryCount }, `Notification task processing completed.`);
+
         if (taskResult.success) {
           shouldAck = true
           logger.info({ messageId, fcmToken: messageData.fcmToken?.substring(0, 10) + '...', success: true }, `Notification task successful.`)
@@ -304,8 +319,8 @@ export default class NotificationWorker extends BaseCommand {
           )
           if (deliveryCount >= MAX_RETRY_BEFORE_DEADLETTER) { // Utiliser >=
             logger.error(
-              { messageId, code: taskResult.code, deliveryCount },
-              `CRITICAL: Max retries (${MAX_RETRY_BEFORE_DEADLETTER}) reached for message. Moving to Dead Letter Queue (simulation) and ACKing.`
+              { messageId, taskData: messageData, taskResultError: taskResult.error, deliveryCount },
+              `Max retries reached. Message content that failed.`
             )
             // TODO: Implémenter une vraie Dead Letter Queue (ex: autre stream Redis, table DB)
             // await this.moveToDeadLetterQueue(messageId, messageData, taskResult.error, deliveryCount);
@@ -321,7 +336,7 @@ export default class NotificationWorker extends BaseCommand {
         // Le deliveryCount augmentera naturellement.
         shouldAck = false
       }
-
+      logger.info({ messageId, shouldAck, consumer: this.consumerName }, "Decision on ACKing message.");
 
       if (shouldAck) {
         try {
@@ -338,6 +353,7 @@ export default class NotificationWorker extends BaseCommand {
   private async processNotificationTask(taskData: {
     [key: string]: string
   }): Promise<SendNotificationResult> {
+    logger.warn({ rawTaskDataFromRedis: taskData, function: "processNotificationTask_Entry" }, "Received raw task data from Redis stream message");
     const { fcmToken, title, body, data: dataString, notificationType: typeFromStream } = taskData
 
     if (!fcmToken || !title || !body) {
@@ -354,32 +370,34 @@ export default class NotificationWorker extends BaseCommand {
         return { success: false, error: parseError, code: 'JSON_PARSE_ERROR', isTokenInvalid: false }
       }
     }
-
+    logger.warn({ typeFromStream, parsedDataFromString }, "Parsed components for finalNotificationType");
     // Gestion du 'type' de notification:
     // Priorité 1: 'notificationType' directement du message stream (si RedisHelper l'ajoute)
     // Priorité 2: 'type' à l'intérieur de l'objet 'data' parsé
     // Priorité 3: undefined
     const finalNotificationType = (typeFromStream || parsedDataFromString.type) as NotificationType;
 
+    logger.warn({ finalNotificationType }, "Determined finalNotificationType");
     const finalDataPayload = {
       ...parsedDataFromString, // Les données du JSON string
-      // Le type est géré séparément et peut être passé à NotificationHelper si son API le supporte
-      // ou inclus dans data si c'est la convention.
-      // Pour l'instant, on suppose que NotificationHelper.sendPushNotification ne prend pas 'type' en argument direct,
-      // mais qu'il doit être dans le payload 'data'.
     } as { [key: string]: any; type: NotificationType };
+
+
     if (finalNotificationType && !finalDataPayload.type) { // S'assurer que `type` est dans data si pas déjà présent
       finalDataPayload.type = finalNotificationType;
     }
+    logger.warn({ finalDataPayloadIncludingType: finalDataPayload }, "Constructed finalDataPayload for NotificationHelper");
 
 
-    // logger.debug({ fcmToken: fcmToken.substring(0,10)+"...", title, body, data: finalDataPayload }, "Attempting to send push notification.")
-    return NotificationHelper.sendPushNotification({
+    const payloadForHelper = {
       fcmToken,
       title,
       body,
-      data: finalDataPayload, // Contient maintenant le 'type' correctement sourcé
-    })
+      data: finalDataPayload,
+    };
+    logger.warn({ payloadForHelper, function: "processNotificationTask_PreSend" }, "Payload constructed for NotificationHelper.sendPushNotification");
+
+    return NotificationHelper.sendPushNotification(payloadForHelper);
   }
 
 

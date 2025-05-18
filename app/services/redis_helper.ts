@@ -6,19 +6,13 @@ import { NotificationPayload } from '../contracts/events.js' // Supposons que ce
 
 // --- Stream Keys ---
 // Stream pour les offres initiales aux chauffeurs (consommé par un système qui envoie la notif/affiche l'offre)
-const MISSION_OFFER_STREAM_KEY = env.get('REDIS_MISSION_OFFER_STREAM', 'mission_offers_stream')
+const MISSION_OFFER_STREAM_KEY = env.get('REDIS_MISSION_OFFER_STREAM')
 
 // Stream pour les événements qui impactent la logique d'assignation (consommé par AssignmentWorker)
-const ASSIGNMENT_EVENTS_STREAM_KEY = env.get(
-  'REDIS_ASSIGNMENT_LOGIC_STREAM', // Renommé pour plus de clarté
-  'assignment_events_stream'
-)
+const ASSIGNMENT_EVENTS_STREAM_KEY = env.get('REDIS_ASSIGNMENT_LOGIC_STREAM')
 
 // Stream pour les notifications génériques (consommé par NotificationWorker)
-const NOTIFICATION_QUEUE_STREAM = env.get(
-  'REDIS_NOTIFICATION_QUEUE_STREAM', // Nom plus explicite
-  'notification_queue_stream'
-)
+const NOTIFICATION_QUEUE_STREAM = env.get('REDIS_NOTIFICATION_QUEUE_STREAM')
 
 // --- Event Types ---
 // Enum pour les types d'événements Redis pour plus de cohérence et de maintenabilité
@@ -472,14 +466,13 @@ class RedisHelper {
       // S'il y a un type dans notificationPayload.data, on pourrait le sortir au niveau supérieur aussi
       if (data && typeof data === 'object' && 'type' in data) {
         redisMessageData.push('notificationType', String(data.type));
+        logger.info({ notificationPayloadData: data, addedNotificationType: String(data.type) }, "Extracted 'type' for Redis message");
+      } else {
+        logger.info({ notificationPayloadData: data }, "'type' not found in data payload for Redis message");
       }
 
 
       const messageId = await redis.xadd(NOTIFICATION_QUEUE_STREAM, '*', ...redisMessageData);
-      logger.debug(
-        { messageId, stream: NOTIFICATION_QUEUE_STREAM, fcmToken: fcmToken.substring(0, 10) + "..." },
-        `Notification enqueued to Redis Stream`
-      );
       return messageId;
     } catch (error) {
       logger.error(

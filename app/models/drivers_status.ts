@@ -54,8 +54,9 @@ export default class DriversStatus extends BaseModel {
 
 export enum DriverStatus {
   ACTIVE = 'active',
-  PENDING = 'pending',
+  OFFERING = 'offering',
   IN_WORK = 'in_work',
+  PENDING = 'pending',
   ON_BREAK = 'on_break',
   INACTIVE = 'inactive',
 }

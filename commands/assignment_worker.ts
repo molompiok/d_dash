@@ -8,7 +8,7 @@ import db from '@adonisjs/lucid/services/db'
 import Order from '#models/order'
 import Driver from '#models/driver'
 import { OrderStatus } from '#models/order' // Assurez-vous que OrderStatus est bien défini
-import { DriverStatus } from '#models/drivers_status'
+import DriversStatus, { DriverStatus } from '#models/drivers_status'
 import { VehicleStatus } from '#models/driver_vehicle'
 
 // --- Helpers et Types de RedisHelper ---
@@ -27,18 +27,21 @@ import redisHelper, {
 } from '#services/redis_helper' // Correction: import en tant que default
 import { NotificationType } from '#models/notification' // Si toujours utilisé directement ici
 import env from '#start/env'
+import { cuid } from '@adonisjs/core/helpers'
+import OrderStatusLog from '#models/order_status_log'
+import redis_helper from '#services/redis_helper'
 
 // --- Configuration ---
 const ASSIGNMENT_EVENTS_STREAM_KEY = env.get(
   'REDIS_ASSIGNMENT_LOGIC_STREAM', // Garder le nom de la variable d'env
   'assignment_events_stream' // Valeur par défaut mise à jour
 )
-const WORKER_POLLING_INTERVAL_MS = env.get('WORKER_POLLING_INTERVAL_MS', 5000)
-const OFFER_EXPIRATION_SCAN_INTERVAL_MS = env.get('OFFER_EXPIRATION_SCAN_INTERVAL_MS', 30000)
-const MAX_ASSIGNMENT_ATTEMPTS = env.get('MAX_ASSIGNMENT_ATTEMPTS', 5)
-const OFFER_DURATION_SECONDS = env.get('DRIVER_OFFER_DURATION_SECONDS', 60)
-const DRIVER_SEARCH_RADIUS_KM = env.get('DRIVER_SEARCH_RADIUS_KM', 5)
-const MAX_EVENTS_PER_POLL = env.get('MAX_EVENTS_PER_POLL', 10)
+const WORKER_POLLING_INTERVAL_MS = env.get('WORKER_POLLING_INTERVAL_MS')
+const OFFER_EXPIRATION_SCAN_INTERVAL_MS = env.get('OFFER_EXPIRATION_SCAN_INTERVAL_MS')
+const MAX_ASSIGNMENT_ATTEMPTS = env.get('MAX_ASSIGNMENT_ATTEMPTS')
+const OFFER_DURATION_SECONDS = env.get('DRIVER_OFFER_DURATION_SECONDS')
+const DRIVER_SEARCH_RADIUS_KM = env.get('DRIVER_SEARCH_RADIUS_KM')
+const MAX_EVENTS_PER_POLL = env.get('MAX_EVENTS_PER_POLL')
 
 // Type pour les messages parsés du stream Redis
 // On s'attend à ce que les champs correspondent aux propriétés de nos interfaces MissionEventData
@@ -78,6 +81,7 @@ export default class AssignmentWorker extends BaseCommand {
         )
 
         if (streams && streams.length > 0 && streams[0][1].length > 0) {
+          logger.info(`Received streams ${streams} events from stream.`)
           const messages = streams[0][1] // messages = [ [messageId, fieldsArray], ... ]
           for (const [messageId, fieldsArray] of messages) {
             if (!this.isRunning) break
@@ -122,6 +126,79 @@ export default class AssignmentWorker extends BaseCommand {
       }
     }
     logger.info('Assignment Worker loop ended.')
+  }
+
+  /**
+   * Helper pour remettre un driver au statut ACTIVE après qu'une offre
+   * pour lui a été résolue (expirée, refusée, commande annulée).
+   * @param driverId L'ID du driver.
+   * @param orderId L'ID de la commande pour laquelle l'offre était.
+   * @param reason La raison du changement de statut (pour metadata).
+   * @param trx La transaction de base de données optionnelle.
+   */
+  private async revertDriverToActiveStatus(
+    driverId: string,
+    orderId: string, // Pour le contexte dans les logs/metadata
+    reason: string,
+    trx?: any// Optionnel si l'appelant gère déjà une transaction
+  ): Promise<boolean> {
+    const currentDriverStatusRecord = await DriversStatus.query({ client: trx }) // Utiliser la transaction si fournie
+      .where('driver_id', driverId)
+      .orderBy('changed_at', 'desc')
+      .first();
+
+    if (currentDriverStatusRecord && currentDriverStatusRecord.status === DriverStatus.OFFERING) {
+      // Vérification supplémentaire (optionnelle mais bonne) :
+      // S'assurer que l'offre actuelle de la commande (si elle existe encore) était bien pour ce driver.
+      // Cela évite de changer le statut si une autre offre a été faite à ce driver entre-temps pour une autre commande.
+      // Pour une logique plus simple, on peut juste vérifier si son statut est OFFERING.
+      const orderCheck = await Order.find(orderId, { client: trx });
+      if (orderCheck && orderCheck.offered_driver_id !== driverId && orderCheck.offered_driver_id !== null) {
+        logger.warn({ driverId, orderId, currentOffered: orderCheck.offered_driver_id, reason },
+          `Driver ${driverId} is OFFERING, but order ${orderId} is now offered to someone else or not offered. Status not reverted by this event.`);
+        return false;
+      }
+
+      const driver = await Driver.find(driverId, { client: trx });
+      if (!driver) {
+        logger.warn({ driverId, orderId, reason }, `Driver ${driverId} not found when trying to revert status after offer for ${orderId} ended.`);
+        return false;
+      }
+
+
+      logger.info({ driverId, orderId, reason }, `Reverting driver ${driverId} status to ACTIVE because offer for order ${orderId} ended due to: ${reason}.`);
+
+      await DriversStatus.create(
+        {
+          id: cuid(), // Si vous générez les IDs ainsi
+          driver_id: driverId,
+          status: DriverStatus.ACTIVE, // Le remettre en état de recevoir des offres
+          changed_at: DateTime.now(),
+          assignments_in_progress_count: currentDriverStatusRecord.assignments_in_progress_count, // Conserver le compte
+          metadata: { reason: `offer_ended_for_order_${orderId} - ${reason}` },
+        },
+        { client: trx } // Utiliser la transaction si fournie
+      );
+      if (driver.fcm_token)
+        redis_helper.enqueuePushNotification({
+          fcmToken: driver.fcm_token,
+          title: 'Votre offre a expiré',
+          body: `Votre offre pour la course ${orderId} a expiré.`,
+          data: {
+            newStatus: DriverStatus.ACTIVE, type: NotificationType.SCHEDULE_REMINDER, timestamp: DateTime.now().toISO()
+          },
+        })
+      // Mettre à jour le champ dénormalisé sur le modèle Driver si vous en avez un
+      await Driver.query({ client: trx }).where('id', driverId).update({ latest_status: DriverStatus.ACTIVE });
+      return true;
+    } else if (currentDriverStatusRecord) {
+      logger.warn({ driverId, orderId, currentStatus: currentDriverStatusRecord.status, reason },
+        `Driver ${driverId} status is ${currentDriverStatusRecord.status}, not OFFERING as expected when offer for ${orderId} ended. Status not reverted by this event.`);
+    } else {
+      logger.warn({ driverId, orderId, reason },
+        `No status record found for driver ${driverId} when trying to revert status after offer for ${orderId} ended.`);
+    }
+    return false;
   }
 
   /**
@@ -183,44 +260,65 @@ export default class AssignmentWorker extends BaseCommand {
   // --- Gestionnaires d'événements spécifiques ---
 
   private async handleOfferRefused(event: OfferRefusedData) {
-    const { orderId, driverId: refusingDriverId, reason } = event
-    logger.info(`Driver ${refusingDriverId} REFUSED Order ${orderId}. Reason: ${reason || 'N/A'}`)
+    const { orderId, driverId: refusingDriverId, reason } = event;
+    logger.info(`Driver ${refusingDriverId} REFUSED Order ${orderId}. Reason: ${reason || 'N/A'}`);
 
-    // Nettoyer l'offre actuelle pour ce chauffeur est crucial AVANT de chercher le suivant.
-    // On vérifie que c'est bien lui qui avait l'offre.
-    const offerCleaned = await this.clearCurrentOffer(orderId, refusingDriverId)
-    if (offerCleaned) {
-      await this.findAndOfferNextDriver(orderId, [refusingDriverId]) // Exclut celui qui a refusé
-    } else {
-      logger.warn(
-        { orderId, refusingDriverId },
-        `Refusal received from driver ${refusingDriverId} for order ${orderId}, but they were not the one with the current offer. No action taken.`
-      )
+    const trx = await db.transaction(); // Démarrer une transaction pour les opérations atomiques
+    try {
+      const offerCleaned = await this.clearCurrentOffer(orderId, refusingDriverId, false, trx); // Passer la transaction
+      if (offerCleaned) {
+        await this.revertDriverToActiveStatus(refusingDriverId, orderId, 'offer_refused', trx); // Passer la transaction
+        await trx.commit(); // Valider les changements (nettoyage offre + statut driver)
+        // Maintenant, chercher le prochain driver hors de la transaction, car cela peut prendre du temps
+        await this.findAndOfferNextDriver(orderId, [refusingDriverId]);
+      } else {
+        logger.warn(
+          { orderId, refusingDriverId },
+          `Refusal received from driver ${refusingDriverId} for order ${orderId}, but they were not the one with the current offer or no offer to clear. No status change or reassignment triggered by this specific event instance.`
+        );
+        await trx.rollback(); // Annuler si rien n'a été fait au niveau de l'offre
+      }
+    } catch (error) {
+      await trx.rollback();
+      logger.error({ err: error, orderId, refusingDriverId }, 'Error in handleOfferRefused transaction.');
     }
   }
 
   private async handleOfferExpired(event: OfferExpiredData) {
-    const { orderId, driverId: expiredDriverId } = event
-    logger.warn(`Offer EXPIRED for Driver ${expiredDriverId} on Order ${orderId}.`)
+    const { orderId, driverId: expiredDriverId } = event;
+    logger.warn(`Offer EXPIRED for Driver ${expiredDriverId} on Order ${orderId}.`);
 
-    // Similaire au refus, nettoyer l'offre pour ce chauffeur.
-    // L'événement peut venir d'un autre système, ou du scan de ce worker.
-    const offerCleaned = await this.clearCurrentOffer(orderId, expiredDriverId)
-    if (offerCleaned) {
-      await this.findAndOfferNextDriver(orderId, [expiredDriverId]) // Exclut celui pour qui l'offre a expiré
-    } else {
-      logger.warn(
-        { orderId, expiredDriverId },
-        `Expiration event received for driver ${expiredDriverId}, order ${orderId}, but they were not the one with the current offer. No action taken.`
-      )
+    const trx = await db.transaction();
+    try {
+      const offerCleaned = await this.clearCurrentOffer(orderId, expiredDriverId, false, trx);
+      if (offerCleaned) {
+        await this.revertDriverToActiveStatus(expiredDriverId, orderId, 'offer_expired_event', trx);
+        await trx.commit();
+        await this.findAndOfferNextDriver(orderId, [expiredDriverId]);
+      } else {
+        logger.warn(
+          { orderId, expiredDriverId },
+          `Expiration event for driver ${expiredDriverId}, order ${orderId}, but no active offer was cleared for them. No status change or reassignment triggered by this specific event instance.`
+        );
+        await trx.rollback();
+      }
+    } catch (error) {
+      await trx.rollback();
+      logger.error({ err: error, orderId, expiredDriverId }, 'Error in handleOfferExpired transaction.');
     }
   }
+
   private async handleNewOrderReady(event: NewOrderReadyForAssignmentData) {
     const { orderId, initialAssignmentDetails_parsed } = event; // Utiliser le champ parsé
     logger.info({ orderId, details: initialAssignmentDetails_parsed }, `New order ${orderId} is ready for assignment. Initiating driver search.`);
 
     // Vérifier si la commande n'est pas déjà assignée ou offerte (sécurité, peu probable si l'event est juste après création)
-    const order = await Order.find(orderId);
+    const order = await Order.query()
+      .where('id', orderId)
+      .preload('status_logs', (query) => { // <--- AJOUTER LE PRELOAD
+        query.orderBy('changed_at', 'desc').limit(1) // Charger seulement le plus récent
+      })
+      .first();
     if (!order) {
       logger.warn({ orderId }, `Order ${orderId} for NEW_ORDER_READY event not found. Skipping assignment.`);
       return;
@@ -231,6 +329,7 @@ export default class AssignmentWorker extends BaseCommand {
       );
       return;
     }
+    logger.info({ orderId, status: order.status_logs }, `Order ${orderId} for NEW_ORDER_READY event is PENDING. Proceeding with initial assignment.`);
     if (order.status_logs[0]?.status !== OrderStatus.PENDING) {
       logger.warn({ orderId, status: order.status_logs[0]?.status },
         `Order ${orderId} for NEW_ORDER_READY event is not PENDING. Skipping initial assignment.`
@@ -334,39 +433,38 @@ export default class AssignmentWorker extends BaseCommand {
   }
 
   private async handleOrderTerminalState(event: (MissionCompletedData | MissionCancelledData | MissionFailedData)) {
-    const { orderId, type } = event
-    logger.info(`Order ${orderId} reached terminal state: ${type}. Ensuring no active offers persist.`)
+    const { orderId, type } = event;
+    logger.info(`Order ${orderId} reached terminal state: ${type}. Ensuring no active offers persist.`);
 
-    // Nettoyer toute offre potentiellement active pour cette commande.
-    // Cela peut arriver si, par exemple, une commande est annulée alors qu'une offre était en cours.
-    const trx = await db.transaction()
+    const trx = await db.transaction();
     try {
-      const order = await Order.query({ client: trx }).where('id', orderId).first()
+      // On récupère l'order pour savoir s'il y avait une offre active et pour qui
+      const order = await Order.query({ client: trx }).where('id', orderId).first();
+      let driverToRevert: string | null = null;
+
       if (order && order.offered_driver_id) {
-        const previouslyOfferedDriverId = order.offered_driver_id
-        order.offered_driver_id = null
-        order.offer_expires_at = null
-        await order.save()
-        await trx.commit()
-        logger.info(
-          { orderId, previouslyOfferedDriverId, terminalEventType: type },
-          `Cleaned active offer for order due to terminal state event.`
-        )
-        // TODO: Envisager de notifier le `previouslyOfferedDriverId` que l'offre est annulée
-        // si l'événement terminal n'est pas une acceptation.
-        // Par exemple, si une commande est annulée par un admin pendant qu'une offre est en cours.
-        // await redisHelper.enqueuePushNotification(...)
-      } else {
-        if (order && !order.offered_driver_id) {
-          logger.info({ orderId, terminalEventType: type }, `Order already had no active offer. No cleanup needed.`)
-        } else if (!order) {
-          logger.warn({ orderId, terminalEventType: type }, `Order not found during terminal state processing.`)
+        driverToRevert = order.offered_driver_id;
+        const { cleaned } = await this.clearCurrentOffer(orderId, driverToRevert, true, trx); // forceClear = true
+        if (!cleaned) {
+          // Devrait être rare ici si on a trouvé un offered_driver_id
+          logger.warn({ orderId, driverToRevert }, "Terminal state: Offer was present but clearCurrentOffer reported no change.");
         }
-        await trx.rollback() // Pas de commit si rien n'a changé ou si order non trouvé
       }
+
+      if (driverToRevert) {
+        await this.revertDriverToActiveStatus(driverToRevert, orderId, `order_terminal_state_${type}`, trx);
+      }
+
+      await trx.commit();
+      if (driverToRevert) {
+        logger.info({ orderId, driverId: driverToRevert, terminalEventType: type }, `Cleaned active offer and reverted driver status due to terminal state event.`);
+      } else {
+        logger.info({ orderId, terminalEventType: type }, `No active offer to clean or driver to revert for terminal state event.`);
+      }
+
     } catch (error) {
-      await trx.rollback()
-      logger.error({ err: error, orderId, type }, `Error processing terminal state for order.`)
+      await trx.rollback();
+      logger.error({ err: error, orderId, type }, `Error processing terminal state for order.`);
     }
   }
 
@@ -449,6 +547,7 @@ export default class AssignmentWorker extends BaseCommand {
     attemptCount_?: number // Renommé pour éviter conflit avec un potentiel champ 'attemptCount' sur Order
   ) {
 
+    logger.info(`Attempting to find next driver for Order ${orderId}, excluding ${excludeDriverIds.length} drivers: [${excludeDriverIds.join(', ')}]`)
     // Récupérer la commande pour obtenir le nombre de tentatives global et autres détails
     const orderForAttempts = await Order.find(orderId)
     if (!orderForAttempts) {
@@ -485,6 +584,7 @@ export default class AssignmentWorker extends BaseCommand {
       order = await Order.query({ client: trx })
         .where('id', orderId)
         .preload('pickup_address')
+        .preload('route_legs')
         .preload('packages')
         .preload('status_logs', (q) => q.orderBy('changed_at', 'desc').limit(1))
         .first()
@@ -518,8 +618,8 @@ export default class AssignmentWorker extends BaseCommand {
       // ... (logique de recherche de driver, similaire à avant) ...
       const totalWeightG = order.packages.reduce((sum, pkg) => sum + (pkg.dimensions?.weight_g || 0) * (pkg.quantity || 1), 0)
       const pickupPoint = order.pickup_address.coordinates.coordinates
-      const searchRadiusMeters = DRIVER_SEARCH_RADIUS_KM * 1000
-      const nowMinus5Minutes = DateTime.now().minus({ minutes: 5 }).toISO()
+      const searchRadiusMeters = DRIVER_SEARCH_RADIUS_KM
+      const nowMinus5Minutes = DateTime.now().minus({ minutes: 15 }).toISO() //TODO a diminuer a  5 minutes
       const ASSIGNMENT_MAX_CANDIDATES = 500
 
       const availableDrivers = await Driver.query({ client: trx }) // Utiliser la trx pour la lecture aussi
@@ -527,58 +627,93 @@ export default class AssignmentWorker extends BaseCommand {
         .where('latest_status', DriverStatus.ACTIVE) // Suppose un champ dénormalisé
         .preload('vehicles', (vQuery) => vQuery.where('status', VehicleStatus.ACTIVE))
         .whereNotNull('current_location')
-        .where('updated_at', '>', nowMinus5Minutes) // Localisation récente
-        .whereRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) <= ?', [pickupPoint[0], pickupPoint[1], searchRadiusMeters])
+        // .where('last_location_update', '>', nowMinus5Minutes) // Localisation récente
+        // .whereRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) <= ?', [pickupPoint[0], pickupPoint[1], searchRadiusMeters])
         .whereNotIn('drivers.id', excludeDriverIds) // Exclut les précédents
         // TODO: Ajouter d'autres critères (véhicule compatible, etc.)
-        .orderByRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) ASC', [pickupPoint[0], pickupPoint[1]]) // Trier par proximité
+        // .orderByRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) ASC', [pickupPoint[0], pickupPoint[1]]) // Trier par proximité
         .limit(ASSIGNMENT_MAX_CANDIDATES) // Chercher parmi les 10 plus proches par exemple
         .exec()
+      logger.info({ orderId, count: availableDrivers.length, searchRadiusMeters, nowMinus5Minutes },
+        `Found ${availableDrivers.length} potentially available drivers within ${searchRadiusMeters}m with location updated after ${nowMinus5Minutes}.`
+      );
+
+      if (availableDrivers.length === 0) {
+        logger.warn({ orderId, searchRadiusMeters, nowMinus5Minutes }, "No drivers found matching initial criteria (status, location freshness, radius).");
+      }
 
       const suitableDriver = availableDrivers.find(driver =>
-        driver.vehicles.length > 0 &&
-        driver.vehicles.some(v => v.max_weight_kg === null || v.max_weight_kg * 1000 >= totalWeightG) // Comparer en grammes ou kg consistent
+        driver.vehicles.length > 0
+        // && driver.vehicles.some(v => v.max_weight_kg === null || v.max_weight_kg * 1000 >= totalWeightG) // Comparer en grammes ou kg consistent
         // TODO: Ajouter filtrage véhicule plus complexe ici si nécessaire
       )
 
+      logger.info({ suitableDriver }, 'Suitable driver found for Order')
+
       if (suitableDriver) {
-        const selectedDriver = suitableDriver
+
+
+        const previousDriverStatus = await DriversStatus.query({ client: trx }) // Récupérer le dernier statut pour assignments_in_progress_count
+          .where('driver_id', suitableDriver.id)
+          .orderBy('changed_at', 'desc')
+          .first();
+
+
+
+
+        // const selectedDriver = suitableDriver
         const offerExpiresAt = DateTime.now().plus({ seconds: OFFER_DURATION_SECONDS })
 
-        order.offered_driver_id = selectedDriver.id
+        order.offered_driver_id = suitableDriver.id
         order.offer_expires_at = offerExpiresAt
         // `assignment_attempt_count` a déjà été mis à jour avant la transaction
-        await order.save() // Sauvegarde via trx
+        await order.useTransaction(trx).save() // Sauvegarde via trx
+
+        await OrderStatusLog.create(
+          {
+            id: cuid(),
+            order_id: orderId,
+            status: OrderStatus.PENDING, // Statut devient PENDING
+            changed_at: DateTime.now(),
+            // changed_by_user_id: adminUser.id, // L'admin initie ce statut
+            metadata: { reason: 'assigned_by_assignment_worker', waypoint_sequence: -1, waypoint_status: undefined, waypoint_type: undefined, }, // Metadata indiquant l'origine
+            current_location: order.pickup_address.coordinates,
+          },
+          { client: trx }
+        )
+        await DriversStatus.create(
+          {
+            id: cuid(),
+            driver_id: suitableDriver.id,
+            status: DriverStatus.OFFERING, // <--- Mettre à jour le statut
+            changed_at: DateTime.now(),
+            assignments_in_progress_count: previousDriverStatus?.assignments_in_progress_count || 0,
+            metadata: { reason: `offered_order_${orderId} attempt: ${currentAttempt}` },
+          },
+          { client: trx }
+        );
+        await Driver.query({ client: trx }).where('id', suitableDriver.id).update({ latest_status: DriverStatus.OFFERING });
 
         logger.info(
-          { orderId: order.id, driverId: selectedDriver.id, attempt: currentAttempt, expiresAt: offerExpiresAt.toISO() },
+          { orderId: order.id, driverId: suitableDriver.id, attempt: currentAttempt, expiresAt: offerExpiresAt.toISO() },
           `Offering Order to Driver (Attempt ${currentAttempt})`
         )
 
-        // Publier l'événement NEW_OFFER_PROPOSED (qui déclenchera la notif via un autre système/worker)
-        // OU envoyer la notification directement ici si c'est le flux souhaité.
-        // Le `RedisHelper.publishNewMissionOffer` est fait pour un système qui écoute et notifie.
-        // Si ce worker doit notifier directement, il utiliserait `enqueuePushNotification`.
-        // Supposons que nous voulons que le `NotificationWorker` gère l'envoi basé sur un événement.
-        // (Alternative: envoyer directement la notif push)
-
-        if (selectedDriver.fcm_token) {
+        if (suitableDriver.fcm_token) {
           const notifTitle = `Nouvelle Mission Proposée (Tent. ${currentAttempt})`
           const notifBody = `Course #${order.id.substring(0, 6)}... Rém: ${order.remuneration} EUR. Exp: ${offerExpiresAt.toFormat('HH:mm:ss')}`
           const notifData = {
             order_id: order.id,
-            offer_expires_at: offerExpiresAt.toISO(),
-            order: JSON.stringify(order),
             type: NotificationType.NEW_MISSION_OFFER, // Assurez-vous que ce type est bien géré
           }
           await redisHelper.enqueuePushNotification({
-            fcmToken: selectedDriver.fcm_token,
+            fcmToken: suitableDriver.fcm_token,
             title: notifTitle,
             body: notifBody,
             data: notifData,
           })
         } else {
-          logger.warn(`Driver ${selectedDriver.id} has no FCM token. Offer made but not notified via push.`)
+          logger.warn(`Driver ${suitableDriver.id} has no FCM token. Offer made but not notified via push.`)
         }
         // L'événement RedisHelper.publishNewMissionOffer n'est plus appelé ici, car l'offre est gérée en DB
         // et la notification est envoyée directement. Si un autre système doit savoir qu'une offre est active,
@@ -648,30 +783,34 @@ export default class AssignmentWorker extends BaseCommand {
    * @param orderId L'ID de la commande.
    * @param expectedDriverId L'ID du chauffeur qui était censé avoir l'offre (pour sécurité).
    * @param forceClear Si true, nettoie l'offre même si `expectedDriverId` ne correspond pas (utile si la commande n'est plus PENDING).
+   * @param trx La transaction DB existante
    * @returns True si l'offre a été nettoyée, false sinon.
    */
-  private async clearCurrentOffer(orderId: string, expectedDriverId: string, forceClear: boolean = false): Promise<boolean> {
-    const trx = await db.transaction()
+  private async clearCurrentOffer(orderId: string, expectedDriverId: string, forceClear: boolean = false, trx?: any): Promise<{ cleaned: boolean; driverIdWhoseOfferWasCleaned?: string }> {
     try {
       const order = await Order.query({ client: trx }).where('id', orderId).first()
 
       if (!order) {
         logger.warn(`Order ${orderId} not found for clearing offer.`)
-        await trx.rollback(); return false;
+        await trx.rollback();
+        return { cleaned: false };
       }
 
       if (order.offered_driver_id === null) {
         // logger.trace(`Order ${orderId} had no active offer. No clearing needed.`);
-        await trx.rollback(); return false; // Pas d'offre à nettoyer, mais ce n'est pas un échec de nettoyage.
+        await trx.rollback();
+        return { cleaned: false }; // Pas d'offre à nettoyer, mais ce n'est pas un échec de nettoyage.
         // Retourner false car rien n'a été "nettoyé".
       }
+      const driverIdWhoseOfferWasCleaned = order.offered_driver_id;
 
       if (!forceClear && order.offered_driver_id !== expectedDriverId) {
         logger.warn(
           { orderId, offered: order.offered_driver_id, expected: expectedDriverId },
           `Attempted to clear offer for driver ${expectedDriverId}, but current offer is for ${order.offered_driver_id}. No change made.`
         )
-        await trx.rollback(); return false;
+        await trx.rollback();
+        return { cleaned: false };
       }
 
       // Si on est ici, soit forceClear est true, soit expectedDriverId correspond.
@@ -683,12 +822,12 @@ export default class AssignmentWorker extends BaseCommand {
       order.offer_expires_at = null
       await order.save()
       await trx.commit()
-      return true
+      return { cleaned: true, driverIdWhoseOfferWasCleaned }
 
     } catch (error) {
       await trx.rollback()
       logger.error({ err: error, orderId, expectedDriverId }, 'Error during clearCurrentOffer.')
-      return false
+      return { cleaned: false }
     }
   }
 

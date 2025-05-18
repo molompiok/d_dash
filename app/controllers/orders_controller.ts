@@ -19,7 +19,7 @@ import { PackageMentionWarning } from '#models/package' // Enum Package
 import logger from '@adonisjs/core/services/logger'
 import { cuid } from '@adonisjs/core/helpers'
 import { DateTime } from 'luxon'
-
+const OFFER_DURATION_SECONDS = env.get('DRIVER_OFFER_DURATION_SECONDS')
 // --- Import des Helpers/Wrappers (chemins à adapter) ---
 import { SimplePackageInfo } from '#services/pricing_helper' // Fonction calculateFees
 import RedisHelper, { RawInitialAssignmentDetails } from '#services/redis_helper' // Fonction publishMissionOffer
@@ -481,7 +481,7 @@ export default class OrderController {
       return response.badRequest({ message: 'Données invalides.', errors: validationError.messages });
     }
 
-    const { orderId, legSequence: legSequenceParam } = params;
+    const { order_id, legSequence: legSequenceParam } = params;
     const legSequence = parseInt(legSequenceParam, 10);
 
     if (isNaN(legSequence) || legSequence < 0) {
@@ -490,7 +490,7 @@ export default class OrderController {
 
     try {
       const order = await Order.query()
-        .where('id', orderId)
+        .where('id', order_id)
         // Optionnel : .where('driver_id', user.driver.id) si le reroutage est initié par le driver assigné
         .preload('route_legs', (query) => { // Précharge tous les legs pour trouver celui qui nous intéresse
           query.orderBy('leg_sequence', 'asc');
@@ -502,7 +502,7 @@ export default class OrderController {
       logger.info({ current_location: payload.current_location }, 'current_location ⛔⛔⛔⛔⛔');
 
       if (!targetLeg || !targetLeg.end_coordinates) {
-        return response.notFound({ message: `Leg ${legSequence} non trouvé ou destination manquante pour la commande ${orderId}.` });
+        return response.notFound({ message: `Leg ${legSequence} non trouvé ou destination manquante pour la commande ${order_id}.` });
       }
 
       const driverCurrentLocation: [number, number] = [
@@ -522,7 +522,7 @@ export default class OrderController {
       );
 
       if (!reroutedLegData) {
-        logger.error(`Échec du reroutage pour Order ${orderId}, Leg ${legSequence}`);
+        logger.error(`Échec du reroutage pour Order ${order_id}, Leg ${legSequence}`);
         return response.internalServerError({ message: 'Impossible de recalculer l\'itinéraire pour ce segment.' });
       }
 
@@ -530,7 +530,7 @@ export default class OrderController {
 
       return response.ok({
         message: 'Segment d\'itinéraire recalculé.',
-        order_id: orderId,
+        order_id: order_id,
         leg_sequence: legSequence,
         rerouted_leg: {
           geometry: reroutedLegData.geometry,
@@ -541,7 +541,7 @@ export default class OrderController {
       });
 
     } catch (error) {
-      logger.error({ err: error, orderId, legSequence }, 'Erreur lors du reroutage du leg');
+      logger.error({ err: error, order_id, legSequence }, 'Erreur lors du reroutage du leg');
       if (error.code === 'E_ROW_NOT_FOUND') {
         return response.notFound({ message: 'Commande non trouvée.' });
       }
@@ -787,6 +787,141 @@ export default class OrderController {
     }
   }
 
+  /**
+  * Récupère les détails formatés d'une offre de mission pour un livreur.
+  */
+  async get_offer_details({ params, auth, response }: HttpContext) {
+    try {
+      const orderId = params.order_id || '1'
+      const user = auth.user // Supposant que votre middleware 'auth' attache l'utilisateur (driver) à `auth.user`
+
+      if (!user) {
+        return response.unauthorized({ message: 'Authentification requise.' })
+      }
+
+      const driver = await Driver.query()
+        .where('user_id', user.id)
+        .first()
+
+      if (!driver) {
+        return response.unauthorized({ message: 'Authentification requise.' })
+      }
+      // Charger la commande avec les relations nécessaires
+      let order = await Order.query()
+        .where('id', orderId)
+        .preload('route_legs')
+        .preload('status_logs', (q) => q.orderBy('changed_at', 'desc'))
+        .first()
+
+
+
+      if (!order) {
+        const orderOffered = await Order.query()
+          .where('offered_driver_id', driver.id)
+          // .where('offer_expires_at', '>', DateTime.now().toSQLDate())
+          .preload('route_legs') // Pour obtenir les géométries des legs
+          .preload('status_logs', (q) => q.orderBy('changed_at', 'desc'))
+          .first()
+        if (!orderOffered) {
+          let driverStatus = await DriversStatus.query()
+            .where('driver_id', driver.id)
+            .orderBy('changed_at', 'desc')
+
+
+          if (driverStatus?.[0].status === DriverStatus.OFFERING) {
+            await DriversStatus.create({
+              id: cuid(),
+              driver_id: driver.id,
+              status: driverStatus?.[1].status,
+              changed_at: DateTime.now(),
+              assignments_in_progress_count: driverStatus?.[1].assignments_in_progress_count,
+              metadata: { reason: `offer_ended_for_order` },
+            })
+            if (driver.fcm_token)
+              redis_helper.enqueuePushNotification({
+                fcmToken: driver.fcm_token,
+                title: 'Mise à jour de votre disponibilité',
+                body: `Votre statut de disponibilité est remis à : ${driverStatus?.[1].status}.`,
+                data: { newStatus: driverStatus?.[1].status, type: NotificationType.SCHEDULE_REMINDER, timestamp: DateTime.now().toISO() },
+              })
+          }
+          return response.ok({ message: 'Offre de mission non trouvée.' })
+        }
+        order = orderOffered
+      }
+
+      // Vérifier si l'offre est bien pour ce livreur et n'est pas expirée
+      // (et que la commande est dans un statut où elle peut être offerte, ex: PENDING)
+      if (order.offered_driver_id !== driver.id) {
+        return response.forbidden({ message: "Cette offre ne vous est pas destinée." })
+      }
+      if (order.offer_expires_at && order.offer_expires_at < DateTime.now()) {
+        return response.gone({ message: "Cette offre a expiré." })
+      }
+      if (order.status_logs[0].status !== OrderStatus.PENDING) {
+        return response.forbidden({ message: "Cette commande n'est plus en statut PENDING." })
+      }
+
+
+      // Construire la réponse EnrichedMissionOffer
+      if (!order.waypoints_summary) {
+        // Cas critique : une offre ne devrait pas exister sans waypoints_summary
+        console.error(`Order ${order.id} is offered but has no waypoints_summary.`);
+        return response.internalServerError({ message: "Données de mission incomplètes pour cette offre." });
+      }
+
+      // Calculer la distance et la durée totales à partir des legs si elles ne sont pas stockées sur l'Order
+      // (Idéalement, ces valeurs seraient calculées et stockées sur l'Order lors de sa création/optimisation)
+      let estimatedTotalDistanceMeters = 0;
+      let estimatedTotalDurationSeconds = 0;
+
+      if (order.route_legs && order.route_legs.length > 0) {
+        for (const leg of order.route_legs) {
+          estimatedTotalDistanceMeters += leg.distance_meters || 0;
+          estimatedTotalDurationSeconds += leg.duration_seconds || 0;
+        }
+      } else {
+        // Fallback si pas de legs, essayer de sommer les estimations sur l'order si elles existent
+        // Cette logique dépend de comment vous stockez ces totaux
+        // Par exemple, si order.route_distance_meters et order.route_duration_seconds existent
+        // estimatedTotalDistanceMeters = order.route_distance_meters || 0;
+        // estimatedTotalDurationSeconds = order.route_duration_seconds || 0;
+        console.warn(`Order ${order.id} has no route_legs, total distance/duration might be inaccurate for offer.`);
+      }
+
+
+      const enrichedOffer = {
+        orderId: order.id,
+        estimatedRemuneration: order.remuneration, // Assurez-vous que c'est bien la rémunération du livreur
+        currency: order.currency,
+        estimatedTotalDistanceMeters: estimatedTotalDistanceMeters,
+        estimatedTotalDurationSeconds: estimatedTotalDurationSeconds,
+        waypointsSummary: order.waypoints_summary.map(wp => ({
+          type: wp.type,
+          address_text: wp.address_text || 'Adresse non spécifiée', // Utiliser address_text directement
+          sequence: wp.sequence,
+          name: wp.name, // Sera undefined si non présent
+          coordinates: wp.coordinates, // Doit être [lon, lat]
+        })),
+        // Extraire uniquement les géométries des legs de route
+        routeLegsGeometry: order.route_legs?.map(leg => ({
+          // La géométrie du leg est un objet GeoJSON LineString, on veut juste les coordonnées
+          coordinates: leg?.geometry?.coordinates,
+        })) || [], // Tableau vide si pas de legs
+        expiresAt: order.offer_expires_at ? order.offer_expires_at.toISO() : DateTime.now().plus({ seconds: 30 }).toISO(), // Fallback pour expiresAt
+        priority: order.priority,
+        noteOrder: order.note_order,
+      };
+
+      return response.ok(enrichedOffer);
+
+    } catch (error) {
+      console.error('Error in getOfferDetails:', error);
+      return response.internalServerError({ message: 'Erreur serveur lors de la récupération des détails de l’offre.' });
+    }
+  }
+
+
   // ===============================================
   // Méthodes pour les Admins
   // ===============================================
@@ -1004,6 +1139,7 @@ export default class OrderController {
     const adminUser = auth.getUserOrFail() // Utilisateur Admin
     const orderId = params.id
 
+
     let payload
     try {
       payload = await request.validateUsing(assignDriverValidator)
@@ -1106,7 +1242,11 @@ export default class OrderController {
       logger.info(
         `Driver ${driver_id} availability and vehicle check PASSED for manual assign Order ${orderId}.`
       )
-      order.driver_id = driver_id
+      // order.driver_id = driver_id
+      const offerExpiresAt = DateTime.now().plus({ seconds: OFFER_DURATION_SECONDS })
+
+      order.offered_driver_id = driver_id
+      order.offer_expires_at = offerExpiresAt
 
       if (!driver?.fcm_token) {
         await trx.rollback()
@@ -1118,7 +1258,7 @@ export default class OrderController {
       try {
         const notifTitle = 'Nouvelle Mission Assignée'
         const notifBody = `Une course (ID: #${orderId.substring(0, 6)}...) vous a été assignée manuellement par un administrateur.`
-        const notifData = { type: NotificationType.NEW_MISSION_OFFER, orderId: orderId }
+        const notifData = { type: NotificationType.NEW_MISSION_OFFER, order_id: orderId }
         await redis_helper.enqueuePushNotification({
           fcmToken: driver.fcm_token,
           title: notifTitle,
@@ -1142,7 +1282,7 @@ export default class OrderController {
         {
           id: cuid(),
           order_id: orderId,
-          status: OrderStatus.ACCEPTED, // Statut devient ACCEPTED
+          status: OrderStatus.PENDING, // Statut devient ACCEPTED
           changed_at: DateTime.now(),
           changed_by_user_id: adminUser.id, // L'admin initie ce statut
           metadata: { reason: 'assigned_by_admin', waypoint_sequence: -1, waypoint_status: undefined, waypoint_type: undefined, }, // Metadata indiquant l'origine
@@ -1153,22 +1293,20 @@ export default class OrderController {
       logger.info(
         `OrderStatusLog created with ACCEPTED status for Order ${orderId} by Admin ${adminUser.id}.`
       )
-      //Mettre à jour Statut Driver -> IN_WORK
-      const currentAssignments = lastDriverStatus?.assignments_in_progress_count ?? 0
+      //Mettre à jour Statut Driver -> PENDING
       await DriversStatus.create(
         {
           id: cuid(),
           driver_id,
-          status: DriverStatus.IN_WORK,
+          status: DriverStatus.OFFERING,
           changed_at: DateTime.now(),
-          assignments_in_progress_count: currentAssignments + 1,
         },
         { client: trx }
       )
       logger.info(
-        `Driver ${driver_id} status set to IN_WORK for manual assignment of Order ${orderId}`
+        `Driver ${driver_id} status set to PENDING for manual assignment of Order ${orderId}`
       )
-      await order.save() // Sauvegarde le driver_id via trx
+      await order.useTransaction(trx).save() // Sauvegarde le driver_id via trx
       // 10. Commit Transaction
       await trx.commit()
 
@@ -1203,7 +1341,7 @@ export default class OrderController {
       await order.load('pickup_address')
       await order.load('delivery_address')
       await order.load('packages')
-      // await order.load('route_legs')
+      await order.load('route_legs')
 
       return response.ok({
         message: `Livreur ${driver_id} assigné avec succès à la commande ${orderId}.`,

@@ -43,6 +43,10 @@ export default await Env.create(new URL('../', import.meta.url), {
   REDIS_PORT: Env.schema.number(),
   REDIS_PASSWORD: Env.schema.string.optional(),
 
+  REDIS_MISSION_OFFER_STREAM: Env.schema.string(),
+  REDIS_ASSIGNMENT_LOGIC_STREAM: Env.schema.string(),
+  REDIS_NOTIFICATION_QUEUE_STREAM: Env.schema.string(),
+
   DRIVER_OFFER_DURATION_SECONDS: Env.schema.number(),
   DRIVER_SEARCH_RADIUS_KM: Env.schema.number(),
   ASSIGNMENT_EXPIRATION_SCAN_INTERVAL_MS: Env.schema.number(),

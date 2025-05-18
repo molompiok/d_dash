@@ -168,6 +168,7 @@ export default class DriverStatusController {
     try {
       const affectedRows = await Driver.query().where('id', driverId).update({
         current_location: locationData, // Utilise les données formatées
+        last_location_update: DateTime.now(),
       })
 
       if (affectedRows.length === 0) {
@@ -279,6 +280,8 @@ export default class DriverStatusController {
         .where('driver_id', driverId)
         .orderBy('changed_at', 'desc')
         .first() // Récupère le plus récent
+
+      logger.info({ driverId, lastStatusRecord }, 'Statut actuel récupéré.')
 
       if (!lastStatusRecord) {
         // Cas où le driver n'a encore jamais défini de statut (ex: juste après inscription)

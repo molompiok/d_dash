@@ -189,6 +189,7 @@ export default class AvailabilitySyncWorker extends BaseCommand {
       if (
         [
           DriverStatus.IN_WORK, // En mission
+          DriverStatus.OFFERING, // En acceptation de mission
           DriverStatus.ON_BREAK, // En pause déclarée par le chauffeur
           DriverStatus.PENDING, // En attente de validation admin (si ce statut existe et est pertinent)
           // Ajouter d'autres statuts qui ne doivent pas être écrasés par le planning
@@ -222,7 +223,7 @@ export default class AvailabilitySyncWorker extends BaseCommand {
         try {
           await DriversStatus.create(
             {
-              // id: cuid(), // Laisser la DB générer l'ID si c'est un CUID auto-généré par le modèle/DB
+              id: cuid(), // Laisser la DB générer l'ID si c'est un CUID auto-généré par le modèle/DB
               driver_id: driverId,
               status: targetStatus,
               changed_at: now, // Utiliser le `now` du cycle pour la cohérence

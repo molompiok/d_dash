@@ -68,8 +68,18 @@ class NotificationHelper {
     body,
     data,
   }: NotificationPayload): Promise<SendNotificationResult> {
+    logger.warn({ fcmToken, title, body, data, function: "sendPushNotification_Entry" }, "NotificationHelper.sendPushNotification called with payload");
     if (!isFirebaseInitialized) {
+      logger.error({ function: "sendPushNotification" }, "Firebase SDK not initialized. Attempting re-initialization (or check startup logs).");
       await initializeFirebaseApp();
+      if (!isFirebaseInitialized) {
+        logger.error({ function: "sendPushNotification" }, "Firebase SDK still not initialized after re-attempt.");
+        return {
+          success: false,
+          error: new Error('Firebase not initialized'),
+          code: 'FIREBASE_NOT_INIT',
+        }
+      }
       logger.warn('Attempted to send notification but Firebase SDK is not initialized.')
       return {
         success: false,
@@ -92,7 +102,7 @@ class NotificationHelper {
     }
 
     const isHighPriority = data.type === 'NEW_MISSION_OFFER' || data.type === 'MISSION_UPDATE' || data.type === 'SCHEDULE_REMINDER'; // Exemple
-
+    logger.info({ dataType: data.type, isHighPriority }, "Determined notification priority");
     // Récupère les IDs/sons depuis l'environnement avec fallback
     const androidChannelId = isHighPriority
       ? env.get('ANDROID_HIGH_PRIORITY_CHANNEL_ID', 'high_priority_channel')
@@ -143,7 +153,7 @@ class NotificationHelper {
       token: fcmToken,
       data: data ? this.stringifyDataPayload(data) : {}, // Assure que toutes les data sont string
     }
-
+    logger.warn({ fcmMessageObject: message, function: "sendPushNotification_PreFCM" }, "Constructed FCM message object before sending");
     try {
       logger.debug(
         { fcmTokenStart: fcmToken.substring(0, 10), title },
@@ -152,8 +162,9 @@ class NotificationHelper {
       // Envoi réel du message
       const response = await admin.messaging().send(message)
       logger.info(
-        `FCM message sent successfully. Message ID: ${response}. Token: ${fcmToken.substring(0, 10)}...`
-      )
+        { messageId: response, fcmToken: fcmToken.substring(0, 15) + "...", title, function: "sendPushNotification_Success" },
+        `FCM message sent successfully.`
+      );
       // Succès : retourne un objet avec success=true et l'ID du message FCM
       return { success: true, messageId: response }
     } catch (error: any) {
@@ -165,6 +176,17 @@ class NotificationHelper {
 
       let isTokenInvalid = false
       const errorCode = error.code // Extrait le code d'erreur standard FCM
+
+      logger.error(
+        {
+          err: error, // L'objet erreur complet
+          errorCode, // Code d'erreur FCM
+          fcmToken: fcmToken.substring(0, 15) + "...",
+          title,
+          function: "sendPushNotification_FCMSendError"
+        },
+        'FCM send message failed'
+      )
 
       // --- Logique de Détection de Token Invalide ---
       if (
@@ -181,10 +203,12 @@ class NotificationHelper {
         )
       }
 
-      if (errorCode === 'messaging/quota-exceeded') {
+      else if (errorCode === 'messaging/quota-exceeded') {
         logger.warn('FCM quota exceeded, should retry later.')
         return { success: false, error, code: errorCode, isTokenInvalid: false }
       }
+      else
+        logger.warn('FCM send message failed with unknown error.', { err: error })
       // ---------------------------------------------
 
       // Échec : retourne un objet avec success=false, l'erreur originale, le code FCM et l'indicateur isTokenInvalid
