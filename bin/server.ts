@@ -1,27 +1,12 @@
-/*
-|--------------------------------------------------------------------------
-| HTTP server entrypoint
-|--------------------------------------------------------------------------
-|
-| The "server.ts" file is the entrypoint for starting the AdonisJS HTTP
-| server. Either you can run this file directly or use the "serve"
-| command to run this file and monitor file changes
-|
-*/
+// bin/server.ts
 
 import 'reflect-metadata'
 import { Ignitor, prettyPrintError } from '@adonisjs/core'
+import { createServer } from 'node:http' // Importer createServer
+import Ws from '#services/ws_service'   // Importer votre service
 
-/**
- * URL to the application root. AdonisJS need it to resolve
- * paths to file and directories for scaffolding commands
- */
 const APP_ROOT = new URL('../', import.meta.url)
 
-/**
- * The importer is used to import files in context of the
- * application.
- */
 const IMPORTER = (filePath: string) => {
   if (filePath.startsWith('./') || filePath.startsWith('../')) {
     return import(new URL(filePath, APP_ROOT).href)
@@ -38,7 +23,18 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
     app.listenIf(app.managedByPm2, 'SIGINT', () => app.terminate())
   })
   .httpServer()
-  .start()
+  // Appliquez cette modification :
+  .start((handler) => {
+    // Créez le serveur HTTP en utilisant le gestionnaire de requêtes d'AdonisJS
+    const server = createServer(handler)
+
+    // Initialisez votre service WebSocket avec l'instance du serveur
+    Ws.boot(server)
+    console.log(`info: Booted WebSocket server`)
+
+    // Retournez le serveur pour qu'AdonisJS puisse l'utiliser
+    return server
+  })
   .catch((error) => {
     process.exitCode = 1
     prettyPrintError(error)

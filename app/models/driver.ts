@@ -104,4 +104,7 @@ export default class Driver extends BaseModel {
       driver.id = cuid()
     }
   }
+
+  @hasOne(() => DriverVehicle)
+  declare vehicle: HasOne<typeof DriverVehicle>
 }

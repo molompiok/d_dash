@@ -101,8 +101,8 @@ export default class OrderTrackingController {
       }
       const timer = setTimeout(() => {
         logger.warn(
-          `SSE: Inactivity timeout for order ${orderId} [ConnId: ${connectionId}]. Closing connection.`
-        )
+          `SSE: Inactivity timeout for order ${orderId} [ConnId: ${connectionId}]. Closing connection.`)
+
         // Pas besoin de se désabonner ici, le 'close' event s'en charge
         response.response.end() // Ferme la connexion côté serveur
         connectionTimeouts.delete(connectionId) // Nettoie la map
@@ -118,6 +118,7 @@ export default class OrderTrackingController {
      * Envoie un commentaire vide pour maintenir la connexion ouverte
      * et réinitialise le timeout d'inactivité.
      */
+
     const startPing = () => {
       const pingInterval = setInterval(() => {
         if (response.response.writableEnded) {
@@ -207,16 +208,16 @@ export default class OrderTrackingController {
 
     // --- Définition des Listeners Emitter ---
     const onStatusUpdate = (payload: OrderStatusUpdatePayload) => {
-      if (payload.orderId === orderId) {
+      if (payload.order_id === orderId) {
         logger.debug(
-          `SSE: Pushing status update for ${orderId}: ${payload.newStatus} [ConnId: ${connectionId}]`
+          `SSE: Pushing status update for ${orderId}: ${payload.new_status} [ConnId: ${connectionId}]`
         )
         sendEvent('status_update', payload)
         resetInactivityTimeout() // L'envoi d'un événement compte comme activité
       }
     }
     const onLocationUpdate = (payload: DriverLocationUpdatePayload) => {
-      if (payload.orderId === orderId) {
+      if (payload.order_id === orderId) {
         // Ne pas logger toutes les locations si trop fréquent ? Configurable ?
         logger.trace(`SSE: Pushing location update for ${orderId} [ConnId: ${connectionId}]`)
         sendEvent('location_update', payload)

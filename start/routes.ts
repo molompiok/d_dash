@@ -1,8 +1,10 @@
 import router from '@adonisjs/core/services/router'
 import { middleware } from './kernel.js'
 import OrderController from '#controllers/orders_controller'
-import DriverVehicleController from '#controllers/driver_vehicles_controller'
+// import DriverVehicleController from '#controllers/driver_vehicles_controller'
 import MissionController from '#controllers/missions_controller'
+import DriversController from '#controllers/drivers_controller'
+import VehiclesController from '#controllers/vehicles_controller'
 
 const DriverStatusController = () => import('#controllers/driver_status_controller')
 const OrderTrackingController = () => import('#controllers/SSE/order_trackings_controller')
@@ -23,7 +25,13 @@ router
     router.post('/logout', [AuthController, 'logout'])
     router.get('/profile', [ProfileController, 'me'])
   })
-// .use(middleware.auth({ guards: ['api'] }))
+//.use(middleware.auth({ guards: ['api'] }))
+
+
+router.group(() => {
+  router.get('makes', [VehiclesController, 'getMakes'])
+  router.get('models/:makeId', [VehiclesController, 'getModels'])
+}).prefix('/api/vehicles')
 
 // Onboarding Route
 router.post('/driver/start_onboarding', [AuthController, 'start_driver_onboarding'])
@@ -31,14 +39,17 @@ router.post('/driver/start_onboarding', [AuthController, 'start_driver_onboardin
 router
   .group(() => {
     // Routes véhicules
-    router.get('/vehicles', [DriverVehicleController, 'index'])
-    router.get('/vehicles/:id', [DriverVehicleController, 'show'])
-    router.post('/vehicles', [DriverVehicleController, 'create_vehicle'])
-    router.patch('/vehicles/:id', [DriverVehicleController, 'update_vehicle'])
-    router.delete('/vehicles/:id', [DriverVehicleController, 'delete_vehicle'])
+    // router.get('/vehicles', [DriverVehicleController, 'index'])
+    // router.get('/vehicles/:id', [DriverVehicleController, 'show'])
+    // router.post('/vehicles', [DriverVehicleController, 'create_vehicle'])
+    // router.patch('/vehicles/:id', [DriverVehicleController, 'update_vehicle'])
+    // router.delete('/vehicles/:id', [DriverVehicleController, 'delete_vehicle'])
     // Routes documents véhicules
     router.get('/documents', [UserDocumentController, 'show'])
-    router.post('/documents', [UserDocumentController, 'store_or_update'])
+    router.post('/documents', [UserDocumentController, 'uploadDocument'])
+    router.get('/onboarding/status', [UserDocumentController, 'getStatus'])
+    router.post('vehicle', [DriversController, 'registerVehicle'])
+
   })
   .prefix('/driver')
   .use(middleware.auth({ guards: ['api'] }))
@@ -46,7 +57,7 @@ router
 
 router.group(() => {
   router.patch('/documents/:id/status', [UserDocumentController, 'admin_update_status'])
-  router.patch('/vehicles/:id/status', [DriverVehicleController, 'admin_update_status'])
+  // router.patch('/vehicles/:id/status', [DriverVehicleController, 'admin_update_status'])
 })
   .use(middleware.auth({ guards: ['api'] }))
 
@@ -72,7 +83,6 @@ router
 
 // Public SSE route for tracking
 router.get('/track-stream/:id', [OrderTrackingController, 'stream'])
-
 router.get('/missions/current', [MissionController, 'show'])
 
 router
@@ -80,6 +90,8 @@ router
     router.patch('/status', [DriverStatusController, 'update_status'])
     router.post('/location', [DriverStatusController, 'update_location'])
     router.get('/status', [DriverStatusController, 'get_current_status'])
+    router.post('vehicle/upload-photos', [DriversController, 'uploadVehiclePhotos'])
+    router.post('/heartbeat', [DriversController, 'recordHeartbeat'])
   })
   .prefix('/driver')
   .use(middleware.auth({ guards: ['api'] }))
@@ -94,7 +106,14 @@ router.group(() => {
 router.get('/uploads/*', ({ request, response }) => {
   return response.download('.' + request.url())
 })
-
+router
+  .group(() => {
+    // Ajoutez ici d'autres routes pour le livreur si nécessaire...
+    // La nouvelle route pour la mise à jour de la localisation
+    router.post('location/batch', [DriversController, 'batchUpdateLocation'])
+  })
+  .prefix('driver') // Toutes les routes ici commenceront par /driver
+  .use(middleware.auth({ guards: ['api'] }))
 
 router
   .group(() => {

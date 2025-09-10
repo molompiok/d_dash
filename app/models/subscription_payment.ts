@@ -18,7 +18,6 @@ export default class SubscriptionPayment extends BaseModel {
   @column()
   declare amount: number
 
-
   @column()
   declare status: 'pending' | 'completed' | 'failed'
 

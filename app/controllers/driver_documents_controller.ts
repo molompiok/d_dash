@@ -13,6 +13,8 @@ import vine from '@vinejs/vine'
 import { updateFiles } from '#services/media/UpdateFiles'
 import redis_helper from '#services/redis_helper'
 import { NotificationType } from '#models/notification'
+import { createFiles } from '#services/media/CreateFiles'
+import DriverVehicle from '#models/driver_vehicle'
 
 const expirationDateRule = vine.string().transform((value: string) => {
   if (!value.match(/^\d{4}-\d{2}-\d{2}$/)) {
@@ -89,151 +91,325 @@ export default class UserDocumentController {
     }
   }
 
+  public async uploadDocument({ request, auth, response }: HttpContext) {
+    const user = auth.user!
+    await user.load('driver')
+    const driver = user.driver
+
+    if (!driver) {
+      return response.unauthorized({ error: "Livreur non trouvé." })
+    }
+
+    // --- Récupération des données ---
+    // Votre frontend envoie le type de document et les métadonnées
+    const type = request.input('type') as DocumentType
+    const metadataInput = request.input('metadata')
+    let metadata = null;
+    try {
+        // Les métadonnées sont envoyées en tant que chaîne JSON, il faut les parser
+        if (metadataInput) {
+            metadata = JSON.parse(metadataInput);
+        }
+    } catch (error) {
+        return response.badRequest({ error: 'Les métadonnées ne sont pas un JSON valide.'})
+    }
+    
+    // Le frontend vous a dit quel champ utiliser pour les fichiers
+    // Par exemple : "driver_license_files" ou "national_id_files"
+    // On doit le déduire du 'type' pour le passer à createFiles
+    const fieldNameMapping: Record<string, string> = {
+        [DocumentType.DRIVER_LICENSE]: 'driver_license_files',
+        [DocumentType.NATIONAL_ID]: 'national_id_files',
+        [DocumentType.SELFIE]: 'files', // Nom de champ pour le selfie
+        [DocumentType.VEHICLE_PHOTOS]: 'files', // Nom de champ pour les photos du véhicule
+    };
+
+    const uploadFieldName = fieldNameMapping[type];
+    if (!uploadFieldName) {
+        return response.badRequest({ error: `Type de document inconnu: ${type}`})
+    }
+
+    // --- Traitement des fichiers avec VOTRE logique ---
+    let fileUrls: string[] = [];
+    try {
+      // 2. On appelle votre helper `createFiles`
+      fileUrls = await createFiles({
+        request: request,
+        table_id: driver.id, // On lie les fichiers à l'ID du livreur
+        table_name: 'user_documents',
+        column_name: uploadFieldName, // On utilise le nom de champ dynamique
+        options: {
+          maxSize: 10 * 1024 * 1024, // 10MB, par exemple
+          extname: ['jpg', 'jpeg', 'png', 'webp'],
+          compress: 'img',
+          throwError: true, // Important pour attraper les erreurs
+        }
+      })
+
+      if (fileUrls.length === 0) {
+        return response.badRequest({ error: 'Aucun fichier valide n\'a été traité.'})
+      }
+      
+    } catch (error) {
+      logger.error(error, `Erreur lors du traitement des fichiers pour le livreur ${driver.id}`)
+      return response.internalServerError({ message: 'Erreur lors du traitement des fichiers.', error: error.message })
+    }
+
+    // --- Sauvegarde en base de données ---
+    try {
+      // 3. On utilise `updateOrCreate` pour gérer la mise à jour et la création
+      // On cherche un document existant pour ce livreur ET de ce type, et on le met à jour.
+      // S'il n'existe pas, on le crée.
+      const document = await UserDocument.updateOrCreate(
+        {
+          driver_id: driver.id,
+          type: type,
+        },
+        {
+          file_urls: fileUrls, // Les URLs retournées par votre helper
+          metadata: metadata,
+          status: DocumentStatus.PENDING, // A chaque nouvelle soumission, on repasse le statut en 'pending'
+          submitted_at: DateTime.now(),
+          rejection_reason: null, // On efface l'ancienne raison de rejet s'il y en avait une
+        }
+      )
+
+      logger.info({ documentId: document.id }, `Document pour le livreur ${driver.id} sauvegardé avec succès.`)
+      return response.created(document)
+
+    } catch (error) {
+      logger.error(error, `Erreur de sauvegarde en base de données pour le livreur ${driver.id}`)
+      // [TODO] Ajouter une logique pour supprimer les fichiers qui viennent d'être uploadés si la DB échoue
+      return response.internalServerError({ message: 'Erreur lors de la sauvegarde du document.', error: error.message })
+    }
+  }
+
+
+
+  public async getStatus({ auth, response }: HttpContext) {
+    const ALL_REQUIREMENTS_CONFIG = [
+      {
+        type: DocumentType.NATIONAL_ID,
+        minFiles: 1,
+        maxFiles: 2,
+      },
+      {
+        type: DocumentType.DRIVER_LICENSE,
+        minFiles: 2,
+        maxFiles: 2,
+      },
+      {
+        type: DocumentType.SELFIE,
+        minFiles: 2,
+        maxFiles: 2,
+      },
+      // On pourrait ajouter VEHICLE_PHOTOS ici si c'est toujours requis
+      {
+        type: DocumentType.VEHICLE_PHOTOS,
+        minFiles: 4,
+        maxFiles: 5,
+      }
+    ]
+    const user = auth.user!
+    await user.load('driver')
+    const driver = user.driver
+    if (!driver) {
+      return response.unauthorized({ error: 'Livreur non trouvé' })
+    }
+
+    // 1. Récupérer TOUS les documents que ce livreur a déjà soumis.
+    const submittedDocs = await UserDocument.query().where('driver_id', driver.id)
+
+    // 2. Vérifier si le livreur a au moins un véhicule enregistré.
+    const vehicleCount = await DriverVehicle.query().where('driver_id', driver.id).count('* as total')
+    const hasVehicle = Number(vehicleCount[0].$extras.total) > 0
+
+    // 3. Construire la liste des "requirements" en comparant la config et les documents soumis.
+    const requirements = ALL_REQUIREMENTS_CONFIG.map(config => {
+      const submittedDoc = submittedDocs.find(doc => doc.type === config.type)
+
+      if (submittedDoc) {
+        // Le livreur a soumis ce document, on retourne son statut actuel.
+        return {
+          type: submittedDoc.type,
+          status: submittedDoc.status,
+          rejectionReason: submittedDoc.rejection_reason,
+          lastUpdate: submittedDoc.updated_at.toISO(),
+          minFiles: config.minFiles,
+          maxFiles: config.maxFiles,
+        }
+      } else {
+        // Le livreur n'a pas encore soumis ce document.
+        return {
+          type: config.type,
+          status: 'MISSING', // Le statut est "manquant"
+          rejectionReason: null,
+          lastUpdate: null,
+          minFiles: config.minFiles,
+          maxFiles: config.maxFiles,
+        }
+      }
+    })
+
+    // 4. Déterminer si le livreur est globalement valide.
+    // Il est valide si TOUS les requirements ont le statut 'APPROVED'.
+    const isDriverValid = requirements.every(req => req.status === DocumentStatus.APPROVED)
+
+    // 5. Construire et envoyer la réponse finale, qui correspond à la structure attendue par le frontend.
+    const responsePayload = {
+      isValid: isDriverValid,
+      hasVehicle: hasVehicle,
+      requirements: requirements,
+    }
+
+    return response.ok(responsePayload)
+  }
+
   /**
    * Permet à un driver de soumettre ou de mettre à jour ses documents.
    * POST /driver/documents
    * Nécessite: Auth, Rôle Driver
    */
-  public async store_or_update({ auth, request, response }: HttpContext) {
-    await auth.check()
-    const user = await auth.authenticate()
+  // public async store_or_update({ auth, request, response }: HttpContext) {
+  //   await auth.check()
+  //   const user = await auth.authenticate()
 
-    logger.info({ data: request.allFiles() }, 'User trouvé')
+  //   logger.info({ data: request.allFiles() }, 'User trouvé')
 
-    const driver = await Driver.query()
-      .where('user_id', user.id)
-      .preload('user_document')
-      .first()
+  //   const driver = await Driver.query()
+  //     .where('user_id', user.id)
+  //     .preload('user_document')
+  //     .first()
 
-    if (!driver) {
-      logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
-      return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
-    }
+  //   if (!driver) {
+  //     logger.error({ userId: user.id }, 'Aucun driver trouvé pour ce user')
+  //     return response.unauthorized({ message: 'Aucun driver trouvé pour ce user.' })
+  //   }
 
-    let validated
-    try {
-      validated = await request.validateUsing(userDocumentValidator)
-    } catch (error) {
-      logger.error({ err: error }, 'Erreur validation documents')
-      return response.badRequest({ errors: error.messages })
-    }
+  //   let validated
+  //   try {
+  //     validated = await request.validateUsing(userDocumentValidator)
+  //   } catch (error) {
+  //     logger.error({ err: error }, 'Erreur validation documents')
+  //     return response.badRequest({ errors: error.messages })
+  //   }
 
-    const {
-      identity_document_expiry_date,
-      driving_license_expiry_date,
-      identity_document_images,
-      driving_license_images,
-      type,
-    } = validated
+  //   const {
+  //     identity_document_expiry_date,
+  //     driving_license_expiry_date,
+  //     identity_document_images,
+  //     driving_license_images,
+  //     type,
+  //   } = validated
 
-    const userIdForFiles = driver.id
+  //   const userIdForFiles = driver.id
 
-    const identityFilesPresent = request.files('identity_document_images_0')?.length > 0
-    logger.info({ identityFilesPresent }, 'identityFilesPresent')
-    const licenseFilesPresent = request.files('driving_license_images_0')?.length > 0
-    logger.info({ licenseFilesPresent }, 'licenseFilesPresent')
+  //   const identityFilesPresent = request.files('identity_document_images_0')?.length > 0
+  //   logger.info({ identityFilesPresent }, 'identityFilesPresent')
+  //   const licenseFilesPresent = request.files('driving_license_images_0')?.length > 0
+  //   logger.info({ licenseFilesPresent }, 'licenseFilesPresent')
 
-    if (identityFilesPresent && !identity_document_expiry_date) {
-      return response.badRequest({
-        errors: [
-          {
-            field: 'identity_document_expiry_date',
-            message: "La date d'expiration est requise si des images d'identité sont fournies.",
-          },
-        ],
-      })
-    }
+  //   if (identityFilesPresent && !identity_document_expiry_date) {
+  //     return response.badRequest({
+  //       errors: [
+  //         {
+  //           field: 'identity_document_expiry_date',
+  //           message: "La date d'expiration est requise si des images d'identité sont fournies.",
+  //         },
+  //       ],
+  //     })
+  //   }
 
-    if (licenseFilesPresent && !driving_license_expiry_date) {
-      return response.badRequest({
-        errors: [
-          {
-            field: 'driving_license_expiry_date',
-            message: "La date d'expiration est requise si des images de permis sont fournies.",
-          },
-        ],
-      })
-    }
+  //   if (licenseFilesPresent && !driving_license_expiry_date) {
+  //     return response.badRequest({
+  //       errors: [
+  //         {
+  //           field: 'driving_license_expiry_date',
+  //           message: "La date d'expiration est requise si des images de permis sont fournies.",
+  //         },
+  //       ],
+  //     })
+  //   }
 
-    const trx = await db.transaction()
+  //   const trx = await db.transaction()
 
-    try {
-      const optionsForFiles = {
-        maxSize: 5 * 1024 * 1024,
-        extnames: ['jpg', 'jpeg', 'png', 'pdf', 'webp'],
-        min: 2,
-        max: 2,
-      }
+  //   try {
+  //     const optionsForFiles = {
+  //       maxSize: 5 * 1024 * 1024,
+  //       extnames: ['jpg', 'jpeg', 'png', 'pdf', 'webp'],
+  //       min: 2,
+  //       max: 2,
+  //     }
 
-      let finalIdentityUrls: string[] = []
-      if (identityFilesPresent) {
-        finalIdentityUrls = await updateFiles({
-          request,
-          table_id: userIdForFiles,
-          table_name: 'user_documents',
-          column_name: 'identity_document_images',
-          lastUrls: driver.user_document?.identity_document_images || [],
-          newPseudoUrls: identity_document_images,
-          options: optionsForFiles,
-        })
-      }
+  //     let finalIdentityUrls: string[] = []
+  //     if (identityFilesPresent) {
+  //       finalIdentityUrls = await updateFiles({
+  //         request,
+  //         table_id: userIdForFiles,
+  //         table_name: 'user_documents',
+  //         column_name: 'identity_document_images',
+  //         lastUrls: driver.user_document?.identity_document_images || [],
+  //         newPseudoUrls: identity_document_images,
+  //         options: optionsForFiles,
+  //       })
+  //     }
 
-      let finalLicenseUrls: string[] = []
-      if (licenseFilesPresent) {
-        finalLicenseUrls = await updateFiles({
-          request,
-          table_id: userIdForFiles,
-          table_name: 'user_documents',
-          column_name: 'driving_license_images',
-          lastUrls: driver.user_document?.driving_license_images || [],
-          newPseudoUrls: driving_license_images,
-          options: optionsForFiles,
-        })
-      }
+  //     let finalLicenseUrls: string[] = []
+  //     if (licenseFilesPresent) {
+  //       finalLicenseUrls = await updateFiles({
+  //         request,
+  //         table_id: userIdForFiles,
+  //         table_name: 'user_documents',
+  //         column_name: 'driving_license_images',
+  //         lastUrls: driver.user_document?.driving_license_images || [],
+  //         newPseudoUrls: driving_license_images,
+  //         options: optionsForFiles,
+  //       })
+  //     }
 
-      const dataToSave: Partial<UserDocument> & { driver_id: string } = {
-        driver_id: driver.id,
-        type,
-        identity_document_images: finalIdentityUrls.length > 0 ? finalIdentityUrls : driver.user_document?.identity_document_images,
-        driving_license_images: finalLicenseUrls.length > 0 ? finalLicenseUrls : driver.user_document?.driving_license_images,
-        identity_document_expiry_date: identity_document_expiry_date
-          ? DateTime.fromISO(identity_document_expiry_date)
-          : driver.user_document?.identity_document_expiry_date,
-        driving_license_expiry_date: driving_license_expiry_date
-          ? DateTime.fromISO(driving_license_expiry_date)
-          : driver.user_document?.driving_license_expiry_date,
-        status: DocumentStatus.PENDING,
-        submitted_at: DateTime.now(),
-        rejection_reason: null,
-        verified_at: null,
-      }
+  //     const dataToSave: Partial<UserDocument> & { driver_id: string } = {
+  //       driver_id: driver.id,
+  //       type,
+  //       identity_document_images: finalIdentityUrls.length > 0 ? finalIdentityUrls : driver.user_document?.identity_document_images,
+  //       driving_license_images: finalLicenseUrls.length > 0 ? finalLicenseUrls : driver.user_document?.driving_license_images,
+  //       identity_document_expiry_date: identity_document_expiry_date
+  //         ? DateTime.fromISO(identity_document_expiry_date)
+  //         : driver.user_document?.identity_document_expiry_date,
+  //       driving_license_expiry_date: driving_license_expiry_date
+  //         ? DateTime.fromISO(driving_license_expiry_date)
+  //         : driver.user_document?.driving_license_expiry_date,
+  //       status: DocumentStatus.PENDING,
+  //       submitted_at: DateTime.now(),
+  //       rejection_reason: null,
+  //       verified_at: null,
+  //     }
 
-      let userDocument = driver.user_document
+  //     let userDocument = driver.user_document
 
-      if (userDocument) {
-        userDocument.merge(dataToSave)
-        await userDocument.useTransaction(trx).save()
-        logger.info(`UserDocument ${userDocument.id} mis à jour pour user ${user.id}`)
-      } else {
-        //@ts-ignore
-        userDocument = await UserDocument.create({ ...dataToSave, id: cuid() }, { client: trx })
-        logger.info(`UserDocument ${userDocument.id} créé pour user ${user.id}`)
-      }
+  //     if (userDocument) {
+  //       userDocument.merge(dataToSave)
+  //       await userDocument.useTransaction(trx).save()
+  //       logger.info(`UserDocument ${userDocument.id} mis à jour pour user ${user.id}`)
+  //     } else {
+  //       //@ts-ignore
+  //       userDocument = await UserDocument.create({ ...dataToSave, id: cuid() }, { client: trx })
+  //       logger.info(`UserDocument ${userDocument.id} créé pour user ${user.id}`)
+  //     }
 
-      await trx.commit()
+  //     await trx.commit()
 
-      return response.ok({
-        message: 'Documents soumis avec succès. Ils sont en attente de validation.',
-        document: userDocument.serialize(),
-      })
-    } catch (error) {
-      await trx.rollback()
-      logger.error({ err: error, userId: user.id }, 'Erreur lors de la soumission/màj UserDocument')
-      return response.internalServerError({
-        message: 'Erreur lors de la soumission des documents.',
-      })
-    }
-  }
+  //     return response.ok({
+  //       message: 'Documents soumis avec succès. Ils sont en attente de validation.',
+  //       document: userDocument.serialize(),
+  //     })
+  //   } catch (error) {
+  //     await trx.rollback()
+  //     logger.error({ err: error, userId: user.id }, 'Erreur lors de la soumission/màj UserDocument')
+  //     return response.internalServerError({
+  //       message: 'Erreur lors de la soumission des documents.',
+  //     })
+  //   }
+  // }
 
   listDocumentsQueryValidator = vine.compile(
     vine.object({

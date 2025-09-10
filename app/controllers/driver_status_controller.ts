@@ -10,6 +10,7 @@ import vine from '@vinejs/vine'
 import Order, { OrderStatus } from '#models/order'
 import emitter from '@adonisjs/core/services/emitter'
 import geo_helper from '#services/geo_helper'
+import redis from '@adonisjs/redis/services/main'
 const trackableStatuses: OrderStatus[] = [
   OrderStatus.ACCEPTED,
   OrderStatus.AT_PICKUP,
@@ -108,6 +109,18 @@ export default class DriverStatusController {
         metadata: payload.metadata || undefined, // Stocker les métadonnées si fournies
       })
 
+          // 5. [Amélioration - Heartbeat] Si le livreur passe EN LIGNE, on initialise sa pulsation
+          if (newStatus === DriverStatus.ACTIVE) {
+            const heartbeatKey = `driver:heartbeat:${driver.id}`
+            // On enregistre le timestamp actuel (en secondes) avec une expiration (TTL) de 5 minutes.
+            // Si le livreur ne fait rien pendant 5 min, la clé disparaîtra.
+            await redis.set(heartbeatKey, Math.floor(Date.now() / 1000), 'EX', 300) 
+          }
+          
+          // 6. Si le livreur passe HORS LIGNE, on nettoie sa pulsation
+          if (newStatus === DriverStatus.INACTIVE) {
+            await redis.del(`driver:heartbeat:${driver.id}`)
+          }
       logger.info(`Statut du Driver ${driverId} mis à jour vers ${newStatus}`)
 
       // 3. Réponse

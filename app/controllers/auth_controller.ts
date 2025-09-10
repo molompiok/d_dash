@@ -276,7 +276,7 @@ export default class AuthController {
           // id: cuid(), // Si clé primaire séparée
           average_rating: 0,
           is_valid_driver: false, // Non valide par défaut, nécessite onboarding/validation admin
-          delivery_stats: { success: 0, failure: 0, total: 0 }, // Assurez-vous que c'est bien du JSON si type colonne = json/jsonb
+          // delivery_stats: { success: 0, failure: 0, total: 0 }, // Assurez-vous que c'est bien du JSON si type colonne = json/jsonb
         },
         { client: trx }
       )
@@ -512,7 +512,7 @@ export default class AuthController {
                   // id: cuid(), // si PK séparée
                   average_rating: 0,
                   is_valid_driver: false, // Doit être validé
-                  delivery_stats: { success: 0, failure: 0, total: 0 },
+                  // delivery_stats: { success: 0, failure: 0, total: 0 },
                 },
                 { client: trx }
               )
@@ -620,7 +620,7 @@ export default class AuthController {
           // id: cuid(), // si PK séparée
           average_rating: 0,
           is_valid_driver: false, // Doit être validé
-          delivery_stats: { success: 0, failure: 0, total: 0 },
+          // delivery_stats: { success: 0, failure: 0, total: 0 },
         },
         { client: trx }
       )

@@ -1,10 +1,26 @@
-// app/Modules/Drivers/Models/DriverVehicle.ts
-import { column, belongsTo } from '@adonisjs/lucid/orm'
-import type { BelongsTo } from '@adonisjs/lucid/types/relations'
+// app/models/driver_vehicle.ts
 import { DateTime } from 'luxon'
-import Driver from './driver.js'
-import BaseModel from './base_model.js'
+import { BaseModel, beforeCreate, belongsTo, column } from '@adonisjs/lucid/orm'
+import { cuid } from '@adonisjs/core/helpers'
+import type { BelongsTo } from '@adonisjs/lucid/types/relations'
+import Driver from '#models/driver'
+import VehicleMake from '#models/vehicle_make'
+import VehicleModel from '#models/vehicle_model'
+
+export enum VehicleStatus {
+  PENDING = 'pending',
+  ACTIVE = 'active',
+  REJECTED = 'rejected',
+}
+
 export default class DriverVehicle extends BaseModel {
+  @beforeCreate()
+  public static assignCuid(vehicle: DriverVehicle) {
+    if (!vehicle.id) {
+      vehicle.id = cuid()
+    }
+  }
+
   @column({ isPrimary: true })
   declare id: string
 
@@ -12,46 +28,31 @@ export default class DriverVehicle extends BaseModel {
   declare driver_id: string
 
   @column()
-  declare type: VehicleType
+  declare vehicle_make_id: string
 
   @column()
-  declare license_plate: string | null
-
-  @column.date()
-  declare insurance_expiry_date: DateTime | null
+  declare vehicle_model_id: string
 
   @column()
-  declare has_refrigeration: boolean
+  declare type: 'car' | 'motorbike'
+
+  @column()
+  declare color: string
+
+  @column()
+  declare manufacture_year: number
+
+  @column()
+  declare license_plate: string
 
   @column()
   declare status: VehicleStatus
 
   @column({
-    prepare: (value) => JSON.stringify(value),
+    prepare: (value: string[]) => JSON.stringify(value || []),
+    consume: (value: string) => JSON.parse(value || '[]'),
   })
-  declare vehicle_image: string[]
-
-  @column({
-    prepare: (value) => JSON.stringify(value),
-  })
-  declare license_image: string[]
-
-  @column({
-    prepare: (value) => JSON.stringify(value),
-  })
-  declare vehicle_document: string[]
-
-  @column()
-  declare model: string | null
-
-  @column()
-  declare color: string | null
-
-  @column()
-  declare max_weight_kg: number
-
-  @column({ columnName: 'max_volume_m3' })
-  declare max_volume_m3: number
+  declare image_urls: string[]
 
   @column.dateTime({ autoCreate: true })
   declare created_at: DateTime
@@ -59,23 +60,13 @@ export default class DriverVehicle extends BaseModel {
   @column.dateTime({ autoCreate: true, autoUpdate: true })
   declare updated_at: DateTime
 
-  @belongsTo(() => Driver, {
-    foreignKey: 'driver_id',
-    localKey: 'id',
-  })
+  // --- Relations ---
+  @belongsTo(() => Driver)
   declare driver: BelongsTo<typeof Driver>
-}
 
-export enum VehicleType {
-  Car = 'car',
-  Truck = 'truck',
-  Motorcycle = 'motorcycle',
-}
+  @belongsTo(() => VehicleMake)
+  declare make: BelongsTo<typeof VehicleMake>
 
-export enum VehicleStatus {
-  ACTIVE = 'active',
-  INACTIVE = 'inactive',
-  REJECTED = 'rejected',
-  PENDING = 'pending',
-  MAINTENANCE = 'maintenance',
+  @belongsTo(() => VehicleModel)
+  declare model: BelongsTo<typeof VehicleModel>
 }

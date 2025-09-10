@@ -920,11 +920,10 @@ export default class MissionController {
         }
         targetWaypoint.end_at = actionTimestamp // Heure de complétion du waypoint
       }
-      // Gérer 'skipped' ou 'failed' pour un waypoint si besoin (payload différent)
 
+      // Gérer 'skipped' ou 'failed' pour un waypoint si besoin (payload différent)
       order.waypoints_summary = waypointsSummaryCopy // Réassigner le tableau modifié
       // Le save de 'order' mettra à jour le champ JSON 'waypoints_summary'
-
 
       order.waypoints_summary = waypointsSummaryCopy;
 

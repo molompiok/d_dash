@@ -69,6 +69,7 @@
     "pg": "^8.14.1",
     "reflect-metadata": "^0.2.2",
     "sharp": "^0.34.1",
+    "socket.io": "^4.8.1",
     "wkx": "^0.5.0"
   },
   "hotHook": {
