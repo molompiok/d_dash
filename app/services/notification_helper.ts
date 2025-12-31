@@ -18,7 +18,7 @@ interface ServiceAccount {
   private_key_id: string | undefined;
   private_key: string | undefined;
   client_email: string | undefined;
-  client_id: string | undefined;
+  company_id: string | undefined;
   auth_uri: string | undefined;
   token_uri: string | undefined;
   auth_provider_x509_cert_url: string | undefined;
@@ -36,7 +36,7 @@ async function initializeFirebaseApp() {
       private_key_id: env.get('FIREBASE_PRIVATE_KEY_ID'),
       private_key: env.get('FIREBASE_PRIVATE_KEY')?.replace(/\\n/g, '\n'),
       client_email: env.get('FIREBASE_CLIENT_EMAIL'),
-      client_id: env.get('FIREBASE_CLIENT_ID'),
+      company_id: env.get('FIREBASE_CLIENT_ID'),
       auth_uri: env.get('FIREBASE_AUTH_URI'),
       token_uri: env.get('FIREBASE_TOKEN_URI'),
       auth_provider_x509_cert_url: env.get('FIREBASE_AUTH_PROVIDER_X509_CERT_URL'),
@@ -296,3 +296,13 @@ class NotificationHelper {
 const notificationHelperInstance = new NotificationHelper()
 export default notificationHelperInstance
 export { notificationHelperInstance as NotificationHelper, initializeFirebaseApp } // Double export pour compatibilité
+
+
+
+
+
+
+
+
+
+

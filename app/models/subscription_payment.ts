@@ -1,7 +1,7 @@
 // app/Models/SubscriptionPayment.ts
 import { column, belongsTo } from '@adonisjs/lucid/orm'
 import { DateTime } from 'luxon'
-import Client from './client.js'
+import Company from './company.js'
 import Subscription from './subscription.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
 import BaseModel from './base_model.js'
@@ -10,7 +10,7 @@ export default class SubscriptionPayment extends BaseModel {
   declare id: string
 
   @column()
-  declare client_id: string
+  declare company_id: string
 
   @column()
   declare subscription_id: string
@@ -31,8 +31,8 @@ export default class SubscriptionPayment extends BaseModel {
   declare updated_at: DateTime | null
 
   // Relations
-  @belongsTo(() => Client)
-  declare client: BelongsTo<typeof Client>
+  @belongsTo(() => Company)
+  declare company: BelongsTo<typeof Company>
 
   @belongsTo(() => Subscription)
   declare subscription: BelongsTo<typeof Subscription>

@@ -15,7 +15,7 @@ import { DateTime } from 'luxon'
 // import { updateFiles, deleteFiles } from '#services/file_service' // Pour les preuves
 import vine from '@vinejs/vine'
 import redis_helper from '#services/redis_helper'
-import Client from '#models/client'
+import Company from '#models/company'
 import { NotificationType } from '#models/notification'
 
 @inject()
@@ -197,12 +197,12 @@ export default class MissionController {
       // C'est moins critique si on assigne driver_id immédiatement, mais utile pour "nettoyer" des process workers.
 
       // 6. Notifier le client (gestion erreur silencieuse)
-      let clientUser: Client | null = null
+      let clientUser: Company | null = null
       try {
         // @ts-ignore
         await order.load('client', (q) => q.preload('user')) // Assure que la relation est chargée si ce n'était pas le cas
-        if (order.client?.fcm_token) {
-          clientUser = await Client.find(order.client.id)
+        if (order.company?.fcm_token) {
+          clientUser = await Company.find(order.company.id)
           if (clientUser?.fcm_token) {
             await redis_helper.enqueuePushNotification({
               fcmToken: clientUser.fcm_token,
@@ -400,15 +400,15 @@ export default class MissionController {
       }
 
       // Notifier le client si l'événement de refus a bien été publié (impliquant que la réassignation va commencer)
-      if (refusalEventPublished && order.client?.fcm_token) { // Utilise la relation client préchargée
+      if (refusalEventPublished && order.company?.fcm_token) { // Utilise la relation client préchargée
         try {
           await redis_helper.enqueuePushNotification({
-            fcmToken: order.client.fcm_token,
+            fcmToken: order.company.fcm_token,
             title: 'Recherche de livreur en cours',
             body: `Nous recherchons un nouveau livreur pour votre commande #${orderId.substring(0, 6)}.`,
             data: { orderId: order.id, type: NotificationType.MISSION_UPDATE },
           });
-        } catch (e) { logger.error({ err: e, clientId: order.client.id }, "Failed to enqueue client notification after driver refusal."); }
+        } catch (e) { logger.error({ err: e, companyId: order.company.id }, "Failed to enqueue client notification after driver refusal."); }
       }
 
       // Si la publication de l'événement de refus CRUCIAL a échoué, c'est une erreur serveur potentielle
@@ -684,7 +684,7 @@ export default class MissionController {
 
   //     // TODO: Optionnel - Notifier le client du nouveau statut (AT_PICKUP, SUCCESS, FAILED etc.)
   //     //@ts-ignore
-  //     const clientUser = await Client.query().where('id', order.client_id).preload('user').first()
+  //     const clientUser = await Company.query().where('id', order.company_id).preload('user').first()
   //     let notifTitle = ''
   //     let notifBody = ''
   //     let notifData = { type: NotificationType.MISSION_UPDATE, order_id: orderId, status: newStatus, reason: statusMetadata.reason || '' }
@@ -740,11 +740,11 @@ export default class MissionController {
   //     await trx.commit()
   //     try {
   //       // On a besoin de l'orderId, du nouveau statut, et du userId du client
-  //       if (order?.client_id && order?.id) {
+  //       if (order?.company_id && order?.id) {
   //         // Assure que clientUser est défini
   //         emitter.emit('order:status_updated', {
   //           order_id: orderId,
-  //           client_id: order.client_id,
+  //           company_id: order.company_id,
   //           new_status: newStatus, // finalStatus est SUCCESS ou FAILED ici
   //           timestamp: DateTime.now().toISO(),
   //           // logEntry: // Tu peux récupérer et passer le log créé si besoin
@@ -847,7 +847,7 @@ export default class MissionController {
       const order = await Order.query({ client: trx })
         .where('id', orderId)
         .preload('status_logs', q => q.orderBy('changed_at', 'desc')) // Pour le statut global actuel
-        .preload('client') // Pour les notifications client
+        .preload('company') // Pour les notifications client
         // Pas besoin de précharger route_legs ici, sauf si la logique de statut en dépend
         .first()
 
@@ -1102,10 +1102,10 @@ export default class MissionController {
       await trx.commit()
 
       // Envoyer la notification au client après le commit
-      if (mainNotificationTitle && order.client?.fcm_token) {
+      if (mainNotificationTitle && order.company?.fcm_token) {
         try {
           await redis_helper.enqueuePushNotification({
-            fcmToken: order.client.fcm_token,
+            fcmToken: order.company.fcm_token,
             title: mainNotificationTitle,
             body: mainNotificationBody,
             data: { order_id: order.id, status: newGlobalOrderStatus || currentOrderStatusGlobal, type: NotificationType.MISSION_UPDATE }

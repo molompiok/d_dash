@@ -63,7 +63,7 @@ export default class ProfileController {
     try {
       // Charge les relations en fonction du rôle pour une réponse complète
       if (role === 'client') {
-        await user.load('client', (query) => query.preload('subscription')) // Exemple : Charger aussi l'abonnement
+        await user.load('company', (query) => query.preload('subscription')) // Charger l'entreprise avec l'abonnement
       } else if (role === 'driver') {
         await user.load('driver', (query) => query.preload('vehicles').preload('user_document')) // Charger relations du driver
       }
@@ -128,10 +128,10 @@ export default class ProfileController {
       // Mise à jour du FCM Token en fonction du rôle
       if (payload.fcm_token !== undefined && payload.role) {
         if (payload.role === RoleType.CLIENT) {
-          await user.load('client')
-          user.client.useTransaction(trx)
-          user.client.fcm_token = payload.fcm_token
-          await user.client.save()
+          await user.load('company')
+          user.company.useTransaction(trx)
+          user.company.fcm_token = payload.fcm_token
+          await user.company.save()
         } else if (payload.role === RoleType.DRIVER) {
           await user.load('driver')
           user.driver.useTransaction(trx)
@@ -147,7 +147,7 @@ export default class ProfileController {
 
       // Recharge la bonne relation après commit
       if (payload.role === RoleType.CLIENT) {
-        await user.load('client')
+        await user.load('company')
       } else if (payload.role === RoleType.DRIVER) {
         await user.load('driver')
       }

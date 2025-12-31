@@ -25,10 +25,10 @@ export default class extends BaseSchema {
       table.enum('payment_method', Object.values(PaymentMethod))
       table.jsonb('metadata').defaultTo('{}')
       table
-        .string('client_id')
+        .string('company_id')
         .unsigned()
         .references('id')
-        .inTable('clients')
+        .inTable('companies')
         .onDelete('SET NULL')
         .nullable()
       table

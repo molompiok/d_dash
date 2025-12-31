@@ -26,7 +26,7 @@ const PLATFORM_MARGIN_FACTOR = 1.05 // Marge de 5% pour la plateforme
 
 class PricingHelper {
   /**
-   * Calcule les frais client et la rémunération livreur estimés
+   * Calcule les frais du client final (celui qui passe la commande) et la rémunération livreur estimés
    * pour une commande pouvant contenir plusieurs colis.
    * Tous les montants sont en Franc CFA (XOF).
    */
@@ -100,15 +100,15 @@ class PricingHelper {
       const variableCostPart = calculatedCost - BASE_FEE
       let driverRemuneration = BASE_FEE * 0.5 + variableCostPart * DRIVER_PERCENTAGE
 
-      // 4. Calculer le prix client
+      // 4. Calculer le prix pour le client final (celui qui passe la commande)
       let clientFee = calculatedCost * PLATFORM_MARGIN_FACTOR
 
       // 5. Arrondir et vérifier minimums
-      clientFee = Math.max(500, Math.round(clientFee)) // Prix client minimum 500 CFA, arrondi à l'unité
+      clientFee = Math.max(500, Math.round(clientFee)) // Prix client final minimum 500 CFA, arrondi à l'unité
       driverRemuneration = Math.max(300, Math.round(driverRemuneration)) // Rémunération min 300 CFA, arrondi à l'unité
 
       logger.info(
-        `Frais calculés - Client: ${clientFee} CFA, Livreur: ${driverRemuneration} CFA`
+        `Frais calculés - Client final: ${clientFee} CFA, Livreur: ${driverRemuneration} CFA`
       )
 
       return { clientFee, driverRemuneration }

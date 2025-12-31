@@ -622,18 +622,31 @@ export default class AssignmentWorker extends BaseCommand {
       const nowMinus5Minutes = DateTime.now().minus({ minutes: 15 }).toISO() //TODO a diminuer a  5 minutes
       const ASSIGNMENT_MAX_CANDIDATES = 500
 
-      const availableDrivers = await Driver.query({ client: trx }) // Utiliser la trx pour la lecture aussi
-        .select('drivers.*') // Assurez-vous que fcm_token est bien sélectionné
-        .where('latest_status', DriverStatus.ACTIVE) // Suppose un champ dénormalisé
+      // Stratégie d'assignation: privilégier les drivers de l'entreprise
+      // 1. D'abord chercher parmi les drivers de l'entreprise
+      // 2. Si aucun trouvé, élargir à tous les drivers disponibles
+      let availableDrivers = await Driver.query({ client: trx })
+        .select('drivers.*')
+        .where('latest_status', DriverStatus.ACTIVE)
         .preload('vehicles', (vQuery) => vQuery.where('status', VehicleStatus.ACTIVE))
         .whereNotNull('current_location')
-        // .where('last_location_update', '>', nowMinus5Minutes) // Localisation récente
-        // .whereRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) <= ?', [pickupPoint[0], pickupPoint[1], searchRadiusMeters])
-        .whereNotIn('drivers.id', excludeDriverIds) // Exclut les précédents
-        // TODO: Ajouter d'autres critères (véhicule compatible, etc.)
-        // .orderByRaw('ST_DistanceSphere(current_location::geometry, ST_MakePoint(?, ?)::geometry) ASC', [pickupPoint[0], pickupPoint[1]]) // Trier par proximité
-        .limit(ASSIGNMENT_MAX_CANDIDATES) // Chercher parmi les 10 plus proches par exemple
+        .where('company_id', order.company_id) // Filtrer par company_id de la commande
+        .whereNotIn('drivers.id', excludeDriverIds)
+        .limit(ASSIGNMENT_MAX_CANDIDATES)
         .exec()
+
+      // Si aucun driver de l'entreprise trouvé, chercher parmi tous les drivers disponibles
+      if (availableDrivers.length === 0) {
+        logger.info({ orderId, companyId: order.company_id }, 'No drivers found for company, searching all available drivers')
+        availableDrivers = await Driver.query({ client: trx })
+          .select('drivers.*')
+          .where('latest_status', DriverStatus.ACTIVE)
+          .preload('vehicles', (vQuery) => vQuery.where('status', VehicleStatus.ACTIVE))
+          .whereNotNull('current_location')
+          .whereNotIn('drivers.id', excludeDriverIds)
+          .limit(ASSIGNMENT_MAX_CANDIDATES)
+          .exec()
+      }
       logger.info({ orderId, count: availableDrivers.length, searchRadiusMeters, nowMinus5Minutes },
         `Found ${availableDrivers.length} potentially available drivers within ${searchRadiusMeters}m with location updated after ${nowMinus5Minutes}.`
       );

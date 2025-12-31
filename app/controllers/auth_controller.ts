@@ -4,7 +4,7 @@ import type { HttpContext } from '@adonisjs/core/http'
 import { inject } from '@adonisjs/core'
 import db from '@adonisjs/lucid/services/db'
 import User from '#models/user'
-import Client from '#models/client'
+import Company from '#models/company'
 import Driver from '#models/driver'
 import { RoleType } from '#models/user' // Assurez-vous que cet enum est correct
 import logger from '@adonisjs/core/services/logger'
@@ -119,7 +119,7 @@ export default class AuthController {
   // }
 
   /**
-   * Enregistre un nouvel utilisateur de type Client.
+   * Enregistre un nouvel utilisateur de type Company.
    * POST /register_user
    */
   async register_user({ request, response }: HttpContext) {
@@ -150,20 +150,20 @@ export default class AuthController {
       logger.info(`User ${newUser.id} (${email}) créé (dans TRX)`)
 
       // 2. Crée le client associé
-      // Note: Envisager d'utiliser user_id comme clé primaire pour Client si la relation est 1-1
-      await Client.create(
+      // Note: Envisager d'utiliser user_id comme clé primaire pour Company si la relation est 1-1
+      await Company.create(
         {
           user_id: newUser.id,
-          // Génération ID pour Client si pas 1-1 avec User
+          // Génération ID pour Company si pas 1-1 avec User
           // id: cuid(),
           api_key: `secret_${string.generateRandom(32)}`, // Clé API plus robuste
           order_count: 0,
-          is_valid_client: true, // Client valide par défaut à l'inscription
+          is_valid_company: true, // Company valide par défaut à l'inscription
           // subscription_id: ID_SOUSCRIPTION_PAR_DEFAUT, // A adapter selon votre logique
         },
         { client: trx }
       )
-      logger.info(`Client associé créé pour user ${newUser.id} (dans TRX)`)
+      logger.info(`Company associé créé pour user ${newUser.id} (dans TRX)`)
 
       // 3. Traite le fichier photo si fourni
       if (photoFile && newUser) {
@@ -197,7 +197,7 @@ export default class AuthController {
       // Recharge l'utilisateur pour être sûr d'avoir toutes les données à jour
       const finalUser = await User.findOrFail(newUser.id)
       logger.info(`User ${newUser.id} rechargé`)
-      await finalUser.load('client') // Charger la relation client
+      await finalUser.load('company') // Charger la relation client
 
       return response.created({
         user: finalUser.serialize(),
@@ -353,7 +353,7 @@ export default class AuthController {
   }
 
   /**
-   * Connecte un utilisateur (Client ou Driver) via email/password.
+   * Connecte un utilisateur (Company ou Driver) via email/password.
    * POST /login
    */
   async login({ request, response }: HttpContext) {
@@ -365,11 +365,11 @@ export default class AuthController {
       logger.info(`Connexion réussie pour user ${user.id} (${email})`)
 
       // 2. Vérification additionnelle (optionnelle, dépend de la logique métier)
-      // if (user.role === RoleType.CLIENT && !user.client?.is_valid_client) { // Charger la relation avant
-      //    await user.load('client')
-      //    if(!user.client?.is_valid_client) {
+      // if (user.role === RoleType.CLIENT && !user.company?.is_valid_company) { // Charger la relation avant
+      //    await user.load('company')
+      //    if(!user.company?.is_valid_company) {
       //       logger.warn(`Tentative connexion client non valide: ${user.id}`)
-      //       return response.unauthorized({ message: "Votre compte client n'est pas actif." })
+      //       return response.unauthorized({ message: "Votre compte entreprise n'est pas actif." })
       //    }
       // }
       // if (user.role === RoleType.DRIVER && !user.driver?.is_valid_driver) {
@@ -387,7 +387,7 @@ export default class AuthController {
 
 
       // 4. Charge la relation correspondante au rôle pour l'inclure dans la réponse
-      if (role === RoleType.CLIENT) await user.load('client')
+      if (role === RoleType.CLIENT) await user.load('company')
       if (role === RoleType.DRIVER) await user.load('driver')
 
       return response.ok({
@@ -421,11 +421,11 @@ export default class AuthController {
     const webClientId = env.get('GOOGLE_WEB_CLIENT_ID');
     const androidClientId = env.get('GOOGLE_CLIENT_ID');
 
-    // Assurez-vous qu'au moins le Web Client ID est défini
+    // Assurez-vous qu'au moins le Web Company ID est défini
     if (!webClientId) {
       logger.fatal('GOOGLE_WEB_CLIENT_ID is not set in environment variables!');
       // Gérez l'erreur - arrêt du serveur ou configuration par défaut impossible ?
-      throw new Error('Configuration Google Web Client ID manquante côté serveur.');
+      throw new Error('Configuration Google Web Company ID manquante côté serveur.');
     }
     const validAudiences = [webClientId];
     if (androidClientId) {
@@ -472,9 +472,9 @@ export default class AuthController {
             }
             await user.useTransaction(trx).save() // Sauvegarde dans la transaction
           } else {
-            // 4. Ni Google ID, ni Email -> Nouvel utilisateur (Client par défaut)
+            // 4. Ni Google ID, ni Email -> Nouvel utilisateur (Company par défaut)
             isNewUser = true
-            logger.info(`Création nouvel user (Client) via Google pour ${payload.email}`)
+            logger.info(`Création nouvel user (Company) via Google pour ${payload.email}`)
             const randomPassword = string.generateRandom(32) // Génère un mdp aléatoire fort
 
             user = await User.create(
@@ -492,18 +492,18 @@ export default class AuthController {
             user.useTransaction(trx)
             // Crée le client associé pour ce nouvel utilisateur
             if (role === RoleType.CLIENT) {
-              await Client.create(
+              await Company.create(
                 {
                   user_id: user.id,
                   // id: cuid(), // Si clé primaire séparée
                   api_key: `secret_${string.generateRandom(32)}`,
-                  is_valid_client: true,
+                  is_valid_company: true,
                   order_count: 0,
                   // subscription_id: ID_SOUSCRIPTION_PAR_DEFAUT, // A adapter
                 },
                 { client: trx }
               )
-              logger.info(`Client associé créé pour nouvel user ${user.id} (dans TRX)`)
+              logger.info(`Company associé créé pour nouvel user ${user.id} (dans TRX)`)
             }
             if (role === RoleType.DRIVER) {
               await Driver.create(
@@ -549,7 +549,7 @@ export default class AuthController {
         // --- Fin Transaction ---
 
         // 8. Charge la relation pertinente post-commit
-        if (role === RoleType.CLIENT) await user.load('client')
+        if (role === RoleType.CLIENT) await user.load('company')
         if (role === RoleType.DRIVER) await user.load('driver') // Au cas où un driver se co via Google
 
         const responseData = {
@@ -583,7 +583,7 @@ export default class AuthController {
   }
 
   /**
-   * Permet à un utilisateur connecté (généralement un Client)
+   * Permet à un utilisateur connecté (généralement un Company)
    * de démarrer le processus pour devenir Driver.
    * POST /driver/start_onboarding (nécessite middleware auth)
    */
@@ -593,7 +593,7 @@ export default class AuthController {
     logger.info(`Début onboarding driver pour user ${user.id} (${user.email})`)
 
     // Charge explicitement client et driver pour vérification
-    await user.load('client')
+    await user.load('company')
     await user.load('driver')
 
     // Vérifier si déjà Driver
@@ -626,12 +626,12 @@ export default class AuthController {
       )
       logger.info(`Enregistrement Driver créé pour user ${user.id} (dans TRX)`)
 
-      // 3. Optionnel: Supprimer/désactiver l'enregistrement Client ?
-      // if (user.client) {
-      //    logger.info(`Désactivation/Suppression enregistrement Client ${user.client.id} pour user ${user.id}`);
-      //    user.client.is_valid_client = false; // Désactiver
-      //    await user.client.useTransaction(trx).save();
-      //    // OU: await user.client.useTransaction(trx).delete(); // Supprimer
+      // 3. Optionnel: Supprimer/désactiver l'enregistrement Company ?
+      // if (user.company) {
+      //    logger.info(`Désactivation/Suppression enregistrement Company ${user.company.id} pour user ${user.id}`);
+      //    user.company.is_valid_company = false; // Désactiver
+      //    await user.company.useTransaction(trx).save();
+      //    // OU: await user.company.useTransaction(trx).delete(); // Supprimer
       // }
 
       await trx.commit()

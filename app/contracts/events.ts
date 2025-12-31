@@ -6,7 +6,7 @@ import OrderStatusLog from '#models/order_status_log'
 // Données pour une mise à jour de statut
 export type OrderStatusUpdatePayload = {
   order_id: string
-  client_id: string // L'ID de l'utilisateur client à notifier
+  company_id: string // L'ID de l'entreprise à notifier
   new_status: OrderStatus
   timestamp: string // ISO Timestamp
   // Inclure potentiellement le log entier pour plus de détails?
@@ -16,7 +16,7 @@ export type OrderStatusUpdatePayload = {
 // Données pour une mise à jour de localisation
 export type DriverLocationUpdatePayload = {
   order_id: string // Pour savoir à quelle commande ce driver est lié
-  client_id: string // ID client
+  company_id: string // ID entreprise
   driver_id: string
   location: { latitude: number; longitude: number }
   timestamp: string // ISO Timestamp de la localisation

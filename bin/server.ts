@@ -33,6 +33,7 @@ new Ignitor(APP_ROOT, { importer: IMPORTER })
     console.log(`info: Booted WebSocket server`)
 
     // Retournez le serveur pour qu'AdonisJS puisse l'utiliser
+    // AdonisJS gérera automatiquement l'écoute sur le port configuré dans .env (PORT=3333)
     return server
   })
   .catch((error) => {

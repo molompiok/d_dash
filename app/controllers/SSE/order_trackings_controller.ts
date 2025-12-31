@@ -48,7 +48,7 @@ export default class OrderTrackingController {
         .select('id') // Ne sélectionne que l'ID
         .where('id', orderId)
         // -- Si le suivi est PRIVÉ, ajouter la clause 'andWhere' : --
-        // .andWhere('client_id', user.client?.id) // Vérification propriétaire
+        // .andWhere('company_id', user.company?.id) // Vérification propriétaire
         .first()
 
       if (!orderCheck) {
@@ -233,7 +233,7 @@ export default class OrderTrackingController {
     startPing() // Démarre l'envoi régulier de pings keep-alive
     // -------------------------
 
-    // --- Gérer la Déconnexion Explicite du Client ---
+    // --- Gérer la Déconnexion Explicite du Company ---
     request.request.on('close', () => {
       logger.info(`SSE connection closed BY CLIENT for order ${orderId} [ConnId: ${connectionId}]`)
       // Arrêter les timers

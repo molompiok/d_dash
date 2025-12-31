@@ -29,7 +29,7 @@ import RedisHelper, { RawInitialAssignmentDetails } from '#services/redis_helper
 import vine from '@vinejs/vine'
 import OrderStatusLog from '#models/order_status_log'
 import env from '#start/env'
-import Client from '#models/client'
+import Company from '#models/company'
 import redis_helper from '#services/redis_helper'
 import { NotificationType } from '#models/notification'
 import geo_helper from '#services/geo_helper'
@@ -59,7 +59,7 @@ const assignDriverValidator = vine.compile(
 const listOrdersQueryValidator = vine.compile(
   vine.object({
     status: vine.enum(OrderStatus).optional(),
-    client_id: vine.string().optional(),
+    company_id: vine.string().optional(),
     driver_id: vine.string().optional(),
     date_from: vine
       .string()
@@ -166,20 +166,20 @@ export default class OrderController {
    */
   async create_order({ request, response, auth }: HttpContext) {
     const user = await auth.authenticate()
-    await user.load('client')
-    if (!user.client) {
-      return response.forbidden({ message: 'Utilisateur non associé à un compte client.' })
+    await user.load('company')
+    if (!user.company) {
+      return response.forbidden({ message: 'Utilisateur non associé à un compte entreprise.' })
     }
-    const clientId = user.client.id
+    const companyId = user.company.id
 
     const OFFER_DURATION_SECONDS = env.get('DRIVER_OFFER_DURATION_SECONDS')
 
     let payload
     try {
       payload = await request.validateUsing(createOrderWithWaypointsValidator)
-      logger.info({ payload }, `Validation payload création commande client ${clientId}`)
+      logger.info({ payload }, `Validation payload création commande client ${companyId}`)
     } catch (validationError) {
-      logger.warn({ err: validationError.messages }, `Validation payload création commande client ${clientId}`)
+      logger.warn({ err: validationError.messages }, `Validation payload création commande client ${companyId}`)
       return response.badRequest({ message: 'Données de commande invalides.', errors: validationError.messages })
     }
 
@@ -277,7 +277,7 @@ export default class OrderController {
       const priority = (payload.priority || OrderPriority.MEDIUM) as OrderPriority
       newOrder.fill({
         id: cuid(),
-        client_id: clientId,
+        company_id: companyId,
         pickup_address_id: firstPickupProcessed.address_model.id,
         delivery_address_id: lastDeliveryProcessed.address_model.id,
         priority: priority,
@@ -451,7 +451,7 @@ export default class OrderController {
       if (trx.isCompleted === false && trx.isTransaction === false) { // Vérifier si la transaction est toujours active
         await trx.rollback()
       }
-      logger.error({ err: error, clientId }, 'Erreur globale création commande avec waypoints')
+      logger.error({ err: error, companyId }, 'Erreur globale création commande avec waypoints')
       return response.internalServerError({ message: error.message || 'Erreur serveur lors de la création de la commande.' })
     }
   }
@@ -556,15 +556,15 @@ export default class OrderController {
   async show({ params, response, auth }: HttpContext) {
     await auth.check()
     const user = await auth.authenticate()
-    await user.load('client')
-    if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
+    await user.load('company')
+    if (!user.company) return response.forbidden({ message: 'Company non trouvé.' })
 
     const orderId = params.id
 
     try {
       const order = await Order.query()
         .where('id', orderId)
-        .andWhere('client_id', user.client.id) // Le client ne voit que SES commandes
+        .andWhere('company_id', user.company.id) // Le client ne voit que SES commandes
         .preload('pickup_address')
         .preload('delivery_address')
         .preload('packages')
@@ -584,7 +584,7 @@ export default class OrderController {
       return response.ok(order.serialize({ fields: { omit: ['confirmation_code'] } })) // Omet le code ici aussi
     } catch (error) {
       logger.error(
-        { err: error, orderId, clientId: user.client.id },
+        { err: error, orderId, companyId: user.company.id },
         'Erreur récupération commande client'
       )
       return response.internalServerError({
@@ -600,8 +600,8 @@ export default class OrderController {
   async index({ request, response, auth }: HttpContext) {
     await auth.check()
     const user = await auth.authenticate()
-    await user.load('client')
-    if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
+    await user.load('company')
+    if (!user.company) return response.forbidden({ message: 'Company non trouvé.' })
 
     // Pagination simple pour la liste client
     const page = request.input('page', 1)
@@ -609,7 +609,7 @@ export default class OrderController {
 
     try {
       const ordersPaginated = await Order.query()
-        .where('client_id', user.client.id)
+        .where('company_id', user.company.id)
         .preload('pickup_address', (q) => q.select(['city', 'street_address'])) // Charger juste quelques infos
         .preload('delivery_address', (q) => q.select(['city', 'street_address']))
         .preload('packages', (q) => q.select(['name', 'dimensions']))
@@ -618,7 +618,7 @@ export default class OrderController {
 
       return response.ok(ordersPaginated.toJSON())
     } catch (error) {
-      logger.error({ err: error, clientId: user.client.id }, 'Erreur listage commandes client')
+      logger.error({ err: error, companyId: user.company.id }, 'Erreur listage commandes client')
       return response.internalServerError({
         message: 'Erreur serveur lors du listage des commandes.',
       })
@@ -632,8 +632,8 @@ export default class OrderController {
   async cancel({ params, request, response, auth }: HttpContext) {
     await auth.check()
     const user = await auth.authenticate()
-    await user.load('client')
-    if (!user.client) return response.forbidden({ message: 'Client non trouvé.' })
+    await user.load('company')
+    if (!user.company) return response.forbidden({ message: 'Company non trouvé.' })
 
     const orderId = params.id
 
@@ -645,7 +645,7 @@ export default class OrderController {
       // Trouver la commande DU client DANS la transaction
       const order = await Order.query({ client: trx })
         .where('id', orderId)
-        .andWhere('client_id', user.client.id)
+        .andWhere('company_id', user.company.id)
         .preload('status_logs', (q) => q.orderBy('changed_at', 'desc').limit(1)) // Charger le dernier statut
         .first()
 
@@ -756,8 +756,8 @@ export default class OrderController {
           .first()
 
         //Envoyer au client
-        const client = await Client.query({ client: trx })
-          .where('id', order.client_id)
+        const client = await Company.query({ client: trx })
+          .where('id', order.company_id)
           //@ts-ignore
           .preload('user', (q) => q.select(['id', 'fcm_token']))
           .first()
@@ -947,8 +947,8 @@ export default class OrderController {
       if (queryParams.status) {
         query.where('status', queryParams.status)
       }
-      if (queryParams.client_id) {
-        query.where('client_id', queryParams.client_id)
+      if (queryParams.company_id) {
+        query.where('company_id', queryParams.company_id)
       }
       if (queryParams.driver_id) {
         query.where('driver_id', queryParams.driver_id)
@@ -1015,11 +1015,11 @@ export default class OrderController {
     // --- Gestion de l'Authentification/Autorisation ---
     // Doit-on être le client propriétaire pour tracker ? Ou est-ce public ?
     // Option 1: Public (n'importe qui avec l'ID peut suivre) - Pas d'auth ici.
-    // Option 2: Client propriétaire seulement - Décommenter les lignes auth ci-dessous.
+    // Option 2: Company propriétaire seulement - Décommenter les lignes auth ci-dessous.
     // await auth.check();
     // const user = await auth.authenticate();
-    // await user.load('client');
-    // if (!user.client) return response.forbidden({ message: 'Client non trouvé.' });
+    // await user.load('company');
+    // if (!user.company) return response.forbidden({ message: 'Company non trouvé.' });
     // ----------------------------------------------------
 
     const orderId = params.id

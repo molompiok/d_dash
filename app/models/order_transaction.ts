@@ -3,7 +3,7 @@ import { column, belongsTo, beforeCreate } from '@adonisjs/lucid/orm'
 import Driver from './driver.js'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
-import Client from './client.js'
+import Company from './company.js'
 import BaseModel from './base_model.js'
 import { cuid } from '@adonisjs/core/helpers'
 export default class OrderTransaction extends BaseModel {
@@ -20,7 +20,7 @@ export default class OrderTransaction extends BaseModel {
   declare currency: string
 
   @column()
-  declare client_id: string
+  declare company_id: string
 
   @column()
   declare type: OrderTransactionType
@@ -62,8 +62,8 @@ export default class OrderTransaction extends BaseModel {
   @belongsTo(() => Order)
   declare order: BelongsTo<typeof Order>
 
-  @belongsTo(() => Client)
-  declare client: BelongsTo<typeof Client>
+  @belongsTo(() => Company)
+  declare company: BelongsTo<typeof Company>
 
   @beforeCreate()
   public static async assignCuid(transaction: OrderTransaction) {

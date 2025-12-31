@@ -23,10 +23,10 @@
 // const waypointsForValhalla = [];
 
 // // Point de départ du livreur (si applicable pour le calcul initial)
-// // Si la commande est créée par un client, et qu'aucun livreur n'est encore assigné,
+// // Si la commande est créée par une entreprise, et qu'aucun livreur n'est encore assigné,
 // // le premier "leg" sera calculé plus tard (Driver -> P1) ou le premier leg est P1 -> P2.
 // // Ici, on suppose un scénario où on calcule tout dès qu'on a un point de départ.
-// // Pour une création client pure, le premier waypoint serait la première adresse de collecte.
+// // Pour une création par entreprise pure, le premier waypoint serait la première adresse de collecte.
 
 // let initialDeparturePoint: { coordinates: [number, number]; type: 'break' | 'through'; address_id?: string; address_text?: string; waypoint_type_for_summary?: undefined; } | null = null;
 

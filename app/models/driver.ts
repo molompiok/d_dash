@@ -10,6 +10,7 @@ import DriverVehicle from './driver_vehicle.js'
 import UserDocument from './user_document.js'
 import OrderTransaction, { PaymentMethod } from './order_transaction.js'
 import User from './user.js'
+import Company from './company.js'
 import DriversStatus, { DriverStatus } from './drivers_status.js'
 import { cuid } from '@adonisjs/core/helpers'
 import BaseModel from './base_model.js'
@@ -36,7 +37,7 @@ export default class Driver extends BaseModel {
   declare user_id: string
 
   @column()
-  declare client_id: string | null // Client propriétaire du livreur
+  declare company_id: string | null // Company propriétaire du livreur
 
   @column({
     prepare: (value) => JSON.stringify(value),
@@ -82,6 +83,9 @@ export default class Driver extends BaseModel {
 
   @belongsTo(() => User, { foreignKey: 'user_id' })
   declare user: BelongsTo<typeof User>
+
+  @belongsTo(() => Company, { foreignKey: 'company_id' })
+  declare company: BelongsTo<typeof Company>
 
   @hasMany(() => DriverVehicle, { foreignKey: 'driver_id' })
   declare vehicles: HasMany<typeof DriverVehicle>

@@ -216,7 +216,7 @@ export default class DriverStatusController {
       if (lastStatusRecord?.status === DriverStatus.IN_WORK) {
         // Trouver les commandes pertinentes de ce driver (requête optimisée)
         const activeOrders = await Order.query()
-          .select('id', 'client_id', 'pickup_address_id', 'delivery_address_id') // Sélectionne juste ce dont on a besoin
+          .select('id', 'company_id', 'pickup_address_id', 'delivery_address_id') // Sélectionne juste ce dont on a besoin
           .where('driver_id', driverId)
           // jointure pour vérifier le dernier statut Order directement en BDD
           .whereHas('status_logs', (logQuery) => {
@@ -245,10 +245,10 @@ export default class DriverStatusController {
                 'auto'
               )
               // logger.info(`Travel time for order ${order.id}: ${JSON.stringify(travelTime)} seconds`)
-              if (order.client?.user_id) {
+              if (order.company?.user_id) {
                 emitter.emit('order:driver_location_updated', {
                   order_id: order.id,
-                  client_id: order.client_id,
+                  company_id: order.company_id,
                   driver_id: driverId,
                   location: { latitude, longitude },
                   timestamp: DateTime.now().toISO(),

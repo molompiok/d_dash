@@ -22,7 +22,7 @@ class WsService {
     })
 
     this.io.on('connection', (socket) => {
-      console.log('✅ Client connecté au socket:', socket.id)
+      console.log('✅ Company connecté au socket:', socket.id)
 
       socket.on('authenticate', (data) => {
         if (data && data.driverId) {
@@ -35,7 +35,7 @@ class WsService {
       })
 
       socket.on('disconnect', (reason) => {
-        console.log(`❌ Client déconnecté du socket ${socket.id}: ${reason}`)
+        console.log(`❌ Company déconnecté du socket ${socket.id}: ${reason}`)
       })
     })
   }

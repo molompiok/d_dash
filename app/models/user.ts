@@ -6,7 +6,7 @@ import hash from '@adonisjs/core/services/hash'
 import { DateTime } from 'luxon'
 import BaseModel from './base_model.js'
 // Relations
-import Client from './client.js'
+import Company from './company.js'
 import Driver from './driver.js'
 import UserDocument from './user_document.js'
 import AuditLog from './audit_log.js'
@@ -61,8 +61,8 @@ export default class User extends compose(BaseModel, AuthFinder) {
   declare updated_at: DateTime | null
 
   // Relations classiques
-  @hasOne(() => Client, { foreignKey: 'user_id', localKey: 'id' })
-  declare client: relations.HasOne<typeof Client>
+  @hasOne(() => Company, { foreignKey: 'user_id', localKey: 'id' })
+  declare company: relations.HasOne<typeof Company>
 
   @hasOne(() => Driver, { foreignKey: 'user_id', localKey: 'id' })
   declare driver: relations.HasOne<typeof Driver>

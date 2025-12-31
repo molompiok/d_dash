@@ -3,7 +3,7 @@ import { DateTime } from 'luxon'
 import { column, belongsTo, hasMany } from '@adonisjs/lucid/orm' // BaseModel si tu l'utilises
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
 import Driver from '#models/driver'
-import Client from '#models/client'
+import Company from '#models/company'
 import Address from '#models/address'
 import Package from '#models/package'
 import OrderStatusLog from '#models/order_status_log'
@@ -85,7 +85,7 @@ export default class Order extends BaseModel { // Ou import { BaseModel } from '
   declare id: string
 
   @column()
-  declare client_id: string
+  declare company_id: string
 
   @column()
   declare driver_id: string | null
@@ -172,8 +172,8 @@ export default class Order extends BaseModel { // Ou import { BaseModel } from '
   @belongsTo(() => Driver, { foreignKey: 'driver_id' })
   declare driver: BelongsTo<typeof Driver>
 
-  @belongsTo(() => Client, { foreignKey: 'client_id' })
-  declare client: BelongsTo<typeof Client>
+  @belongsTo(() => Company, { foreignKey: 'company_id' })
+  declare company: BelongsTo<typeof Company>
 
   @belongsTo(() => Address, { foreignKey: 'pickup_address_id' }) // Adresse de départ globale
   declare pickup_address: BelongsTo<typeof Address>

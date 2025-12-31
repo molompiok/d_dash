@@ -149,10 +149,10 @@ export default class BillingWorker extends BaseCommand {
                 return
             }
 
-            // 2. Récupérer les informations nécessaires (Order pour currency et client_id)
+            // 2. Récupérer les informations nécessaires (Order pour currency et company_id)
             const order = await Order.query({ client: trx }) // Utiliser la transaction pour la lecture aussi
                 .where('id', orderId)
-                .preload('client') // Si Order.client_id est l'ID du modèle Client qui a user_id
+                .preload('company') // Si Order.company_id est l'ID du modèle Company qui a user_id
                 .first()
 
             if (!order) {
@@ -182,11 +182,11 @@ export default class BillingWorker extends BaseCommand {
 
 
             // 3. Créer l'enregistrement OrderTransaction avec statut PENDING
-            // Le client_id de la transaction est celui de l'utilisateur qui a passé la commande
-            // On suppose que order.client_id est l'ID du User client.
-            // Si order.client est un modèle Client qui a un user_id: const orderInitiatorClientId = order.client.user_id;
-            // Pour l'instant, on suppose que order.client_id est l'ID de l'utilisateur final.
-            const orderInitiatorUserId = order.client_id;
+            // Le company_id de la transaction est celui de l'entreprise qui a passé la commande
+            // On suppose que order.company_id est l'ID de l'entreprise.
+            // Si order.company est un modèle Company qui a un user_id: const orderInitiatorCompanyId = order.company.user_id;
+            // Pour l'instant, on suppose que order.company_id est l'ID de l'entreprise.
+            const orderInitiatorCompanyId = order.company_id;
 
 
             orderTransaction = await OrderTransaction.create(
@@ -194,7 +194,7 @@ export default class BillingWorker extends BaseCommand {
                     driver_id: driverId,
                     order_id: orderId,
                     currency: order.currency, // Ou une devise par défaut pour les paiements chauffeurs
-                    client_id: orderInitiatorUserId, // L'ID du User qui a initié la commande
+                    company_id: orderInitiatorCompanyId, // L'ID de l'entreprise qui a initié la commande
                     type: OrderTransactionType.DRIVER_PAYMENT,
                     payment_method: activePaymentMethod.number as PaymentMethod, // Ex: 'mtn', 'orange'
                     amount: parseFloat(finalRemuneration as any), // S'assurer que c'est un nombre

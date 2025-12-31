@@ -5,6 +5,7 @@ import OrderController from '#controllers/orders_controller'
 import MissionController from '#controllers/missions_controller'
 import DriversController from '#controllers/drivers_controller'
 import VehiclesController from '#controllers/vehicles_controller'
+import AdminDriversController from '#controllers/admin_drivers_controller'
 
 const DriverStatusController = () => import('#controllers/driver_status_controller')
 const OrderTrackingController = () => import('#controllers/SSE/order_trackings_controller')
@@ -98,7 +99,17 @@ router
 
 
 router.group(() => {
+  // Routes pour assigner un driver à une commande
   router.post('/orders/:id/assign', [OrderController, 'admin_assign_driver'])
+  
+  // Routes pour la gestion des livreurs par entreprise
+  router.get('/drivers', [AdminDriversController, 'index'])
+  router.get('/drivers/:id', [AdminDriversController, 'show'])
+  router.post('/drivers/assign', [AdminDriversController, 'assign'])
+  router.patch('/drivers/:id', [AdminDriversController, 'update'])
+  router.delete('/drivers/:id', [AdminDriversController, 'destroy'])
+  router.get('/drivers/:id/orders', [AdminDriversController, 'getDriverOrders'])
+  router.get('/drivers/:id/stats', [AdminDriversController, 'getDriverStats'])
 })
   .prefix('/admin')
   .use(middleware.auth({ guards: ['api'] }))
@@ -117,6 +128,8 @@ router
 
 router
   .group(() => {
+    router.get('/orders', [OrderController, 'index'])
+    router.get('/orders/:id', [OrderController, 'show'])
     router.post('/orders', [OrderController, 'create_order'])
     router.get('orders/:order_id/legs/:legSequence/reroute', [OrderController, 'reroute_order_leg'])
     router.get('orders/:order_id/offer-details', [OrderController, 'get_offer_details'])

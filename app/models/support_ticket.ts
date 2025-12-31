@@ -1,7 +1,7 @@
 // app/Models/SupportTicket.ts
 import { DateTime } from 'luxon'
 import { column, belongsTo } from '@adonisjs/lucid/orm'
-import Client from './client.js'
+import Company from './company.js'
 import Driver from './driver.js'
 import Order from './order.js'
 import type { BelongsTo } from '@adonisjs/lucid/types/relations'
@@ -11,7 +11,7 @@ export default class SupportTicket extends BaseModel {
   declare id: string
 
   @column()
-  declare client_id: string | null
+  declare company_id: string | null
 
   @column()
   declare driver_id: string | null
@@ -35,8 +35,8 @@ export default class SupportTicket extends BaseModel {
   declare updated_at: DateTime
 
   // Relations
-  @belongsTo(() => Client)
-  declare client: BelongsTo<typeof Client>
+  @belongsTo(() => Company)
+  declare company: BelongsTo<typeof Company>
 
   @belongsTo(() => Driver)
   declare driver: BelongsTo<typeof Driver>

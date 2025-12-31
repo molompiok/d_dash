@@ -1,13 +1,13 @@
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
 export default class extends BaseSchema {
-  protected tableName = 'clients'
+  protected tableName = 'companies'
 
   async up() {
     this.schema.createTable(this.tableName, (table) => {
       table.string('id').primary()
       table.string('user_id').references('id').inTable('users').onDelete('CASCADE')
-      table.boolean('is_valid_client').notNullable().defaultTo(false)
+      table.boolean('is_valid_company').notNullable().defaultTo(false)
       table.string('fcm_token').nullable()
       table.string('api_key').unique().notNullable()
       table.string('company_name').nullable()

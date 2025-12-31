@@ -1,7 +1,7 @@
 // app/Models/Subscription.ts
 import { DateTime } from 'luxon'
 import { column, hasMany } from '@adonisjs/lucid/orm'
-import Client from './client.js'
+import Company from './company.js'
 import SubscriptionPayment from './subscription_payment.js'
 import type { HasMany } from '@adonisjs/lucid/types/relations'
 import BaseModel from './base_model.js'
@@ -25,8 +25,8 @@ export default class Subscription extends BaseModel {
   declare updated_at: DateTime
 
   // Relations
-  @hasMany(() => Client)
-  declare clients: HasMany<typeof Client>
+  @hasMany(() => Company)
+  declare companies: HasMany<typeof Company>
 
   @hasMany(() => SubscriptionPayment)
   declare payments: HasMany<typeof SubscriptionPayment>

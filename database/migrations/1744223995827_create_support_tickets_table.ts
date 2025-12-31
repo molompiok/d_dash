@@ -8,10 +8,10 @@ export default class extends BaseSchema {
     this.schema.createTable(this.tableName, (table) => {
       table.string('id').primary()
       table
-        .string('client_id')
+        .string('company_id')
         .unsigned()
         .references('id')
-        .inTable('clients')
+        .inTable('companies')
         .onDelete('SET NULL')
         .nullable()
       table

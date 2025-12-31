@@ -12,7 +12,7 @@ export default class extends BaseSchema {
   async up() {
     this.schema.createTable(this.tableName, (table) => {
       table.string('id').primary()
-      table.string('client_id').references('id').inTable('clients').onDelete('CASCADE')
+      table.string('company_id').references('id').inTable('companies').onDelete('CASCADE')
       table
         .enum('priority', Object.values(OrderPriority))
         .defaultTo(OrderPriority.MEDIUM)
